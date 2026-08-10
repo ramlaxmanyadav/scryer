@@ -1,0 +1,32 @@
+# Bundler / gem build artifacts
+/.bundle/
+/vendor/bundle/
+/pkg/
+*.gem
+Gemfile.lock
+
+# Test / coverage / docs
+/spec/reports/
+/coverage/
+/.yardoc/
+/_yardoc/
+/doc/
+/tmp/
+/log/
+
+# Ruby version managers
+.rvmrc
+.ruby-gemset
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS cruft
+.DS_Store
+
+# Local Claude Code settings (machine/user-specific, not shared config)
+.claude/settings.local.json

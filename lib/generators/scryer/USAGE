@@ -1,0 +1,66 @@
+Description:
+    Installs Scryer into a Rails application by creating a commented
+    config/initializers/scryer.rb initializer.
+
+    Scryer itself needs no configuration to run — the initializer only
+    exists so you can override defaults. It does not create migrations,
+    routes, controllers, or views: this generator's only side effect is
+    the one file it creates. The rake tasks (`scryer:report`) are made
+    available automatically by Scryer's Railtie the moment the gem is
+    in your Gemfile, with or without running this generator.
+
+    What you get in config/initializers/scryer.rb, and what each option
+    controls:
+
+      c.project_name  - Label shown in the report header. Defaults to the
+                         app's directory name if left unset.
+
+      c.dirs          - Which top-level directories (relative to Rails.root)
+                         get scanned. Defaults to %w[app lib config db].
+                         vendor/, node_modules/, tmp/, log/, .git/, spec/,
+                         and test/ are always skipped regardless of this
+                         setting.
+
+      c.branch        - Overrides the git branch name recorded in the
+                         report. Only useful in CI, where checkouts often
+                         land in a detached-HEAD state and
+                         `git rev-parse --abbrev-ref HEAD` returns nothing
+                         useful. Leave unset to use the actual checked-out
+                         branch.
+
+    Two more things ship in this gem but aren't controlled by the
+    initializer — see the README for both:
+
+      - Scryer::QueryWatcher: an opt-in runtime instrumentation for N+1
+        queries and unused eager loading (README: "Runtime query watcher").
+      - `bin/rails scryer:audit_dependencies`: a Gemfile.lock vulnerability
+        + insecure-source audit against OSV.dev (README: "Dependency audit").
+
+Example:
+    bin/rails generate scryer:install
+
+    This creates:
+        config/initializers/scryer.rb
+
+    After running it:
+        bin/rails scryer:report
+
+    writes tmp/scryer_report.json and tmp/scryer_report.html — open the
+    .html file in a browser to review findings (security, performance,
+    duplicate code), grouped and summarized similarly to a Brakeman report.
+
+    Format and output path are both configurable via task args — any mix of
+    json/html, plus the 'deps' token to fold a dependency audit in, plus at
+    most one path (quote the whole thing so your shell doesn't eat the
+    brackets/commas):
+
+        bin/rails 'scryer:report[json]'                    # just JSON, under tmp/
+        bin/rails 'scryer:report[json,doc/security.json]'  # JSON to an exact file
+        bin/rails 'scryer:report[json,html]'                # both, under tmp/
+        bin/rails 'scryer:report[json,html,reports]'        # both, under reports/
+        bin/rails 'scryer:report[html,deps]'                # HTML + a dependency audit section
+
+    Re-running `bin/rails generate scryer:install` after the initializer
+    already exists follows normal Thor/Rails::Generators behavior: it will
+    prompt to overwrite, skip, or diff the existing file rather than
+    silently clobbering your edits.

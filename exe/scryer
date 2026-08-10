@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "scryer"
+require "scryer/cli"
+
+exit Scryer::CLI.new(ARGV).run
