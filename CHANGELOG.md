@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+- New `scryer -r PATH`/`--require PATH` flag (repeatable): requires a Ruby file before scanning.
+  This is the standalone executable's only way to run `Scryer.configure` (set `c.ai_client`,
+  `c.skip_rules`, `c.dirs`, etc.) before a scan starts — unlike a Rails app, `scryer` has no
+  `config/initializers/` to autoload, so AI-assisted fix suggestions and other config were
+  previously unreachable outside Rails. See the README's AI-assisted fix suggestions section for
+  a full step-by-step for both the Rails and standalone paths.
+
 ## [0.2.0] - 2026-08-11
 
 - New `style` rule category (`Scryer::RuleSet` category `"style"`, alongside `security` and

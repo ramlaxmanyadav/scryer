@@ -23,6 +23,13 @@ module Scryer
     def run
       options = parse(@argv)
       return 0 if options[:exit_early]
+
+      # The standalone executable has no equivalent of a Rails app's
+      # config/initializers/scryer.rb getting autoloaded at boot — this is
+      # the only way to run Scryer.configure (set c.ai_client, c.skip_rules,
+      # c.dirs, ...) before a scan starts outside Rails.
+      Array(options[:require]).each { |path| require File.expand_path(path) }
+
       return check_gem(options[:check_gem]) if options[:check_gem]
 
       root = File.expand_path(options[:path] || Dir.pwd)
@@ -160,6 +167,12 @@ module Scryer
                 "Write a report to PATH (repeatable). Format is inferred from the " \
                 "extension: .json, .html, or .csv.") { |v| options[:outputs] << v }
         opts.on("-p PATH", "--path PATH", "Root directory to scan (default: current directory).") { |v| options[:path] = v }
+        opts.on("-r PATH", "--require PATH",
+                "Require a Ruby file before scanning (repeatable) — the file can call " \
+                "Scryer.configure to set c.ai_client, c.skip_rules, c.dirs, etc. This is the " \
+                "standalone executable's equivalent of a Rails app's config/initializers/scryer.rb " \
+                "getting autoloaded at boot; without it there's no way to configure anything " \
+                "outside Rails.") { |v| (options[:require] ||= []) << v }
         opts.on("--audit-deps",
                 "Check Gemfile.lock for known-vulnerable gems (via OSV.dev — needs network) and " \
                 "insecure git/http sources (offline), instead of running the normal static scan. " \

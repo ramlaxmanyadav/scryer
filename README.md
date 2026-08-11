@@ -450,24 +450,54 @@ This is the same OSV.dev client `vulnerable_gems` uses, exposed as a one-off loo
 Every rule already ships a generic, human-reviewable `suggested_fix` — that's always there and
 needs nothing configured. `Scryer::AiFixSuggester` optionally rewrites that text per finding using
 an LLM, so the suggestion is written against the finding's actual offending line instead of a
-generic template.
+generic template. This is entirely opt-in: with no client configured, `AiFixSuggester` makes zero
+network calls and every finding keeps its original `suggested_fix` — nothing below is required to
+use the rest of Scryer.
 
-**Provider-agnostic by design — bring any LLM.** Scryer doesn't depend on or assume any specific
-vendor's API or SDK (consistent with the zero-runtime-dependency design described in the gemspec).
-Configure `c.ai_client` to any object, or even a bare `Proc`/lambda, that responds to `#call(prompt)`
-(or `#complete(prompt)`) and returns the model's reply as a `String`:
+### Step by step
+
+**Inside a Rails app** — `config/initializers/scryer.rb` is autoloaded at boot, so setting
+`c.ai_client` there is picked up automatically the next time you scan:
 
 ```ruby
 # config/initializers/scryer.rb
 Scryer.configure do |c|
-  # Simplest form: any callable. Wire up whatever SDK/gem you already use —
-  # Scryer never requires one itself.
+  c.ai_client = ->(prompt) { MyLlmClient.chat(prompt) }   # any callable — see below for real examples
+end
+```
+
+```bash
+bin/rails scryer:report
+```
+
+That's the whole flow — no extra flag, no second command. Look for `Scryer: rewriting suggested
+fixes via the configured AI client...` in the task's own output, then open the report: every
+finding's `suggested_fix` is now the LLM's rewrite instead of the generic template.
+
+**Outside Rails (the `scryer` executable)** — there's no `config/initializers/` to autoload here,
+so `Scryer.configure` needs to actually run before the scan starts. That's what `-r`/`--require` is
+for: point it at a small Ruby file that calls `Scryer.configure`, and `scryer` requires it first:
+
+```ruby
+# scryer_config.rb — anywhere in your project, any filename
+Scryer.configure do |c|
   c.ai_client = ->(prompt) { MyLlmClient.chat(prompt) }
 end
 ```
 
-This is entirely opt-in: `c.ai_client` is `nil` by default, and with no client configured
-`AiFixSuggester` makes zero network calls and every finding keeps its original `suggested_fix`.
+```bash
+scryer -r ./scryer_config.rb
+```
+
+Same output, same "rewriting suggested fixes..." line, same result — `-r` is the only difference
+between the two paths, and it's required precisely because the standalone executable has nothing
+else to make `Scryer.configure` code actually run before it scans.
+
+**Provider-agnostic by design — bring any LLM.** Scryer doesn't depend on or assume any specific
+vendor's API or SDK (consistent with the zero-runtime-dependency design described in the gemspec).
+`c.ai_client` accepts any object, or even a bare `Proc`/lambda, that responds to `#call(prompt)`
+(or `#complete(prompt)`) and returns the model's reply as a `String` — the two examples above used
+a placeholder; `Scryer::AiClient` below is a ready-made adapter for a real HTTP endpoint.
 
 ### `Scryer::AiClient` — a ready-made HTTP adapter
 
@@ -508,10 +538,11 @@ a JSON body.
 
 `bin/rails scryer:report` and the `scryer` executable both check `Scryer.configuration.ai_client`
 after scanning and, if set, call `Scryer::AiFixSuggester.enhance_result!(result)` before rendering
-— one LLM call per security/performance finding, run across a small thread pool (same pattern as
-the dependency audit's OSV.dev lookups) rather than one at a time. A client that raises, times out,
-or returns nothing usable just leaves that finding's original `suggested_fix` in place — a failed
-enrichment never fails the scan.
+— one LLM call per security/performance/style finding (plus dependency findings too, if the
+dependency audit ran), run across a small thread pool (same pattern as the dependency audit's
+OSV.dev lookups) rather than one at a time. A client that raises, times out, or returns nothing
+usable just leaves that finding's original `suggested_fix` in place — a failed enrichment never
+fails the scan.
 
 ```ruby
 Scryer::AiFixSuggester.enhance!(finding)          # one Finding, in place
