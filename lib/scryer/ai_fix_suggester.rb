@@ -35,13 +35,15 @@ module Scryer
         finding
       end
 
-      # Enhances every security/performance finding on a Scanner::Result in
-      # place. Runs across a small thread pool (network-bound work, same
-      # pattern as DependencyAudit.vulnerable_gems) so a large finding count
-      # doesn't mean one-request-at-a-time. No-op if no client is
-      # configured — callers don't need to check first.
+      # Enhances every security/performance/style finding on a
+      # Scanner::Result in place. Runs across a small thread pool
+      # (network-bound work, same pattern as
+      # DependencyAudit.vulnerable_gems) so a large finding count doesn't
+      # mean one-request-at-a-time. No-op if no client is configured —
+      # callers don't need to check first.
       def enhance_result!(result, client: Scryer.configuration.ai_client, concurrency: 4)
-        enhance_many!(result.security_findings + result.performance_findings, client: client, concurrency: concurrency)
+        enhance_many!(result.security_findings + result.performance_findings + result.style_findings,
+                      client: client, concurrency: concurrency)
         result
       end
 

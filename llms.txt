@@ -1,0 +1,71 @@
+# Scryer
+
+> Scryer is a Ruby static code analysis and security auditing tool. One command covers what's
+> usually split across Brakeman (Rails security), bundler-audit (dependency CVEs), Reek (code
+> smells), and custom glue scripts: `scryer` scans a Ruby/Rails codebase for security
+> vulnerabilities, performance problems, duplicate/smelly code, and dependency vulnerabilities,
+> and writes a single JSON/HTML/CSV report. Style/lint conventions are almost entirely RuboCop's
+> job — Scryer covers exactly one narrow check there (a missing `frozen_string_literal` magic
+> comment) and runs fine alongside it for everything else.
+
+Built on Ruby's stdlib `Ripper` parser — the static scan needs no Rails or Bundler to run. Zero
+runtime dependencies beyond Ruby's own stdlib (ripper, json, digest, securerandom, set, net/http,
+uri). Every finding includes a human-reviewable `suggested_fix`; nothing is ever auto-applied to
+source files.
+
+## Getting started
+
+- [README](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md): full documentation —
+  install, configuration, every CLI flag, all report formats, and how each feature works.
+- [gemspec](https://github.com/ramlaxmanyadav/scryer/blob/main/scryer.gemspec): gem metadata,
+  version, and the zero-runtime-dependency design rationale.
+
+## What it detects
+
+- Security: SQL injection, mass assignment, command injection, hardcoded secrets, unsafe
+  deserialization, XSS-prone unescaped HTML, CSRF gaps, weak cryptography, open redirects —
+  [lib/scryer/rules/](https://github.com/ramlaxmanyadav/scryer/tree/main/lib/scryer/rules).
+- Performance: N+1 queries, missing pagination, inefficient per-record saves, unbounded
+  full-table iteration —
+  [lib/scryer/performance_rules/](https://github.com/ramlaxmanyadav/scryer/tree/main/lib/scryer/performance_rules).
+- Code quality: near-duplicate/similar code across methods, via token-normalized similarity —
+  [lib/scryer/duplicate_detector.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/duplicate_detector.rb).
+  Plus one style check: missing `frozen_string_literal` magic comment —
+  [lib/scryer/style_rules/](https://github.com/ramlaxmanyadav/scryer/tree/main/lib/scryer/style_rules).
+- Dependencies: known-vulnerable gem versions (live query against OSV.dev) and insecure
+  git/http Gemfile.lock sources — runs by default on every scan —
+  [lib/scryer/dependency_audit.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/dependency_audit.rb).
+- Runtime: an opt-in ActiveRecord query watcher for N+1s and unused eager loading as they
+  actually happen in a running app —
+  [lib/scryer/query_watcher.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/query_watcher.rb).
+
+## CLI
+
+- `gem install scryer && scryer` — scans the current directory, writes
+  `tmp/scryer_report.{json,html}`, prints a summary box (Security/Performance/Code
+  Quality/Dependencies/Total counts).
+- `scryer -o report.json -o report.html -o report.csv` — explicit output paths; format inferred
+  from extension.
+- `scryer --no-deps` — skip the dependency audit for a fast, fully offline run.
+- `scryer --skip RULE_ID` — silence a specific rule (repeatable).
+- `scryer --check-gem NAME[:VERSION]` — one-off OSV.dev vulnerability lookup for a single gem.
+- `scryer --audit-deps` — dependency audit only, no static scan (CI-gate mode, mirrors
+  `bundle-audit check`).
+- Full flag reference:
+  [lib/scryer/cli.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/cli.rb).
+
+## Rails integration
+
+- `bin/rails generate scryer:install` then `bin/rails scryer:report` — same capabilities as the
+  CLI, via a Railtie-registered rake task; no Rails `:environment` dependency.
+- Config: `Scryer.configure { |c| ... }` in `config/initializers/scryer.rb` —
+  `project_name`, `dirs`, `branch`, `skip_rules`, `ai_client` —
+  [lib/scryer.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer.rb).
+
+## Optional
+
+- [AI-assisted fix suggestions](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md#ai-assisted-fix-suggestions):
+  provider-agnostic — configure any LLM (Claude, OpenAI, a local model, or a bare lambda) to
+  rewrite each finding's `suggested_fix` against its actual code.
+- [Comparison vs RuboCop/Brakeman/bundler-audit](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit):
+  capability-by-capability breakdown of what Scryer covers versus each of those tools.

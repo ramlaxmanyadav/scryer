@@ -26,7 +26,7 @@ module Scryer
     QUERY_SIMILARITY_THRESHOLD = 0.7
     CACHE_SIMILARITY_THRESHOLD = 0.7
 
-    Result = Struct.new(:security_findings, :performance_findings, :duplicate_groups, :files_scanned, :parse_errors, keyword_init: true)
+    Result = Struct.new(:security_findings, :performance_findings, :style_findings, :duplicate_groups, :files_scanned, :parse_errors, keyword_init: true)
 
     # `skip_rules` silences specific checks by rule_id (e.g. a known false
     # positive on this codebase) without editing/removing the rule itself —
@@ -44,6 +44,7 @@ module Scryer
       all_cache_calls = []
       security_findings = []
       performance_findings = []
+      style_findings = []
       parse_errors = []
 
       files.each do |abs_path|
@@ -69,6 +70,7 @@ module Scryer
             case rule_class.category
             when "security" then security_findings
             when "performance" then performance_findings
+            when "style" then style_findings
             end
           next unless bucket
 
@@ -97,6 +99,7 @@ module Scryer
       Result.new(
         security_findings: security_findings,
         performance_findings: performance_findings,
+        style_findings: style_findings,
         duplicate_groups: duplicate_groups,
         files_scanned: files.size,
         parse_errors: parse_errors

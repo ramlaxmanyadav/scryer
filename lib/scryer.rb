@@ -15,6 +15,7 @@ require "scryer/ai_fix_suggester"
 
 Dir[File.join(__dir__, "scryer", "rules", "*.rb")].sort.each { |f| require f }
 Dir[File.join(__dir__, "scryer", "performance_rules", "*.rb")].sort.each { |f| require f }
+Dir[File.join(__dir__, "scryer", "style_rules", "*.rb")].sort.each { |f| require f }
 
 module Scryer
   class Configuration

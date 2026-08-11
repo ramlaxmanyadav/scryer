@@ -33,10 +33,16 @@ module Scryer
 
       result = Scanner.new(root: root, dirs: Scryer.configuration.dirs, skip_rules: skip_rules).call
 
+      # Dependency auditing (OSV.dev) runs by default — a single `scryer`
+      # invocation is meant to cover the same ground as RuboCop + Brakeman +
+      # bundler-audit + Reek run separately, and that story isn't true if
+      # the dependency half is silently skipped unless you remember a flag.
+      # `--no-deps` opts back out for a fast, fully offline run (e.g. no
+      # network in this environment, or you only want the static scan).
+      ran_deps = !options[:no_deps]
       dependency_findings = []
-      if options[:include_deps]
-        @stdout.puts "Scryer: checking Gemfile.lock sources (offline)..."
-        @stdout.puts "Scryer: querying OSV.dev for known vulnerabilities (needs network)..."
+      if ran_deps
+        @stdout.puts "Scryer: querying OSV.dev for known-vulnerable gems (needs network)..."
         dependency_findings = DependencyAudit.insecure_sources(root) + DependencyAudit.vulnerable_gems(root)
       end
 
@@ -58,12 +64,7 @@ module Scryer
       outputs = options[:outputs].empty? ? default_outputs(root) : options[:outputs]
       outputs.each { |path| write_report(renderer, path) }
 
-      @stdout.puts "Scryer: #{result.files_scanned} files scanned, " \
-                   "#{result.security_findings.size} security findings, " \
-                   "#{result.performance_findings.size} performance findings, " \
-                   "#{result.duplicate_groups.size} duplicate groups" \
-                   "#{options[:include_deps] ? ", #{dependency_findings.size} dependency findings" : ""}."
-      @stdout.puts "Report written to #{outputs.join(', ')}"
+      print_summary(result: result, dependency_findings: dependency_findings, ran_deps: ran_deps, outputs: outputs)
 
       result.security_findings.empty? && dependency_findings.empty? ? 0 : 1
     rescue UsageError => e
@@ -93,6 +94,42 @@ module Scryer
       total = insecure.size + vulnerable.size
       @stdout.puts "\nScryer: #{total} dependency finding(s) (#{insecure.size} insecure source, #{vulnerable.size} vulnerable gem)."
       total.positive? ? 1 : 0
+    end
+
+    # The "one audit command" summary — a single scan's worth of every
+    # category Scryer covers (security, performance, duplicate/smelly code,
+    # dependencies), the same categories usually split across RuboCop +
+    # Brakeman + bundler-audit + Reek, side by side in one box.
+    def print_summary(result:, dependency_findings:, ran_deps:, outputs:)
+      # "Code Quality" is the umbrella label for both duplicate-code groups
+      # and rule-based style findings (e.g. frozen_string_literal) — two
+      # different detectors, same broad concern, one row in the box.
+      code_quality = result.duplicate_groups.size + result.style_findings.size
+      deps_count = ran_deps ? dependency_findings.size : nil
+      total = result.security_findings.size + result.performance_findings.size + code_quality + (deps_count || 0)
+
+      rows = [
+        ["Security", result.security_findings.size],
+        ["Performance", result.performance_findings.size],
+        ["Code Quality", code_quality],
+        ["Dependencies", deps_count]
+      ]
+
+      divider = "─" * 32
+      @stdout.puts ""
+      @stdout.puts "Scryer Audit — #{result.files_scanned} files scanned"
+      @stdout.puts divider
+      @stdout.puts ""
+      rows.each { |label, count| @stdout.puts summary_row(label, count) }
+      @stdout.puts divider
+      @stdout.puts summary_row("Total", total)
+      @stdout.puts ""
+      outputs.each { |path| @stdout.puts "#{format_for(path).upcase} report: #{path}" }
+    end
+
+    def summary_row(label, count)
+      value = count.nil? ? "skipped (--no-deps)" : "#{count} finding#{"s" unless count == 1}"
+      "#{label.ljust(14)}#{value.rjust(20)}"
     end
 
     # One-off OSV.dev lookup for a single gem — no Gemfile.lock, no scan,
@@ -128,13 +165,11 @@ module Scryer
                 "insecure git/http sources (offline), instead of running the normal static scan. " \
                 "Exits non-zero if anything is found, so this can gate CI the same way " \
                 "`bundle-audit check` does.") { options[:audit_deps] = true }
-        opts.on("--include-deps",
-                "Fold a dependency audit (same checks as --audit-deps: OSV.dev vulnerable gems + " \
-                "insecure git/http sources) into the normal report as one more section, instead " \
-                "of running it as a separate command. Combine with -o to get one HTML/JSON " \
-                "report covering static findings, duplicate code, and dependency findings " \
-                "together — and, with an AI client configured, AI-rewritten suggested fixes for " \
-                "all of them.") { options[:include_deps] = true }
+        opts.on("--no-deps",
+                "Skip the dependency audit (OSV.dev vulnerable gems + insecure git/http sources) " \
+                "that otherwise runs as part of every normal scan. Use this for a fast, fully " \
+                "offline run — e.g. no network available, or you only want the static " \
+                "findings.") { options[:no_deps] = true }
         opts.on("--skip RULE_ID",
                 "Skip a rule by rule_id (repeatable) — e.g. a known false positive on this " \
                 "codebase. Adds to c.skip_rules for this run only; doesn't affect other " \

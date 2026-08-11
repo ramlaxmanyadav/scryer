@@ -44,6 +44,7 @@ module Scryer
         "parse_errors" => @result.parse_errors.map { |pe| { "file" => pe[:file], "error" => pe[:error] } },
         "security_findings" => @result.security_findings.map(&:to_h),
         "performance_findings" => @result.performance_findings.map(&:to_h),
+        "style_findings" => @result.style_findings.map(&:to_h),
         "duplicate_groups" => @result.duplicate_groups.map { |g| duplicate_group_hash(g) },
         "dependency_findings" => @dependency_findings.map(&:to_h)
       }
@@ -66,6 +67,7 @@ module Scryer
       rows = [CSV_HEADERS]
       h["security_findings"].each { |f| rows << static_csv_row(f) }
       h["performance_findings"].each { |f| rows << static_csv_row(f) }
+      h["style_findings"].each { |f| rows << static_csv_row(f) }
       h["dependency_findings"].each { |f| rows << dependency_csv_row(f) }
 
       rows.map { |row| row.map { |field| csv_field(field) }.join(",") }.join("\n")
@@ -75,7 +77,8 @@ module Scryer
       h = as_hash
       security = h["security_findings"]
       performance = h["performance_findings"]
-      all_findings = security + performance
+      style = h["style_findings"]
+      all_findings = security + performance + style
       by_severity = all_findings.group_by { |f| f["severity"] }
       duplicate_groups = h["duplicate_groups"]
       dependency_findings = h["dependency_findings"]
@@ -105,7 +108,7 @@ module Scryer
 
           <section id="summary">
             <h2>Summary</h2>
-            #{render_summary_table(security, performance, duplicate_groups, dependency_findings)}
+            #{render_summary_table(security, performance, style, duplicate_groups, dependency_findings)}
           </section>
 
           <section id="checks-performed">
@@ -185,19 +188,21 @@ module Scryer
       "<table class=\"kv\">#{body}</table>"
     end
 
-    def render_summary_table(security, performance, duplicate_groups, dependency_findings)
+    def render_summary_table(security, performance, style, duplicate_groups, dependency_findings)
       sec_counts = count_by_severity(security)
       perf_counts = count_by_severity(performance)
-      total_counts = SEVERITY_ORDER.each_with_object({}) { |s, acc| acc[s] = sec_counts[s] + perf_counts[s] }
+      style_counts = count_by_severity(style)
+      total_counts = SEVERITY_ORDER.each_with_object({}) { |s, acc| acc[s] = sec_counts[s] + perf_counts[s] + style_counts[s] }
 
       header = "<tr><th>Category</th>" + SEVERITY_ORDER.map { |s| "<th>#{SEVERITY_LABELS[s]}</th>" }.join + "<th>Total</th></tr>"
       sec_row = summary_row("Security", sec_counts)
       perf_row = summary_row("Performance", perf_counts)
+      style_row = summary_row("Style", style_counts)
       total_row = summary_row("Total", total_counts, css_class: "total")
       dup_row = "<tr><th>Duplicate code</th><td colspan=\"#{SEVERITY_ORDER.size}\">—</td><td>#{duplicate_groups.size} group(s)</td></tr>"
       deps_row = "<tr><th>Dependency audit</th><td colspan=\"#{SEVERITY_ORDER.size}\">—</td><td>#{dependency_findings.size} finding(s)</td></tr>"
 
-      "<table class=\"summary\">#{header}#{sec_row}#{perf_row}#{dup_row}#{deps_row}#{total_row}</table>"
+      "<table class=\"summary\">#{header}#{sec_row}#{perf_row}#{style_row}#{dup_row}#{deps_row}#{total_row}</table>"
     end
 
     def summary_row(label, counts, css_class: nil)
@@ -221,9 +226,11 @@ module Scryer
     def render_checks_performed
       security_rules = rules_by_category["security"] || []
       performance_rules = rules_by_category["performance"] || []
+      style_rules = rules_by_category["style"] || []
 
       "<h3>Security (#{security_rules.size})</h3>#{checks_table(security_rules)}" \
-      "<h3>Performance (#{performance_rules.size})</h3>#{checks_table(performance_rules)}"
+      "<h3>Performance (#{performance_rules.size})</h3>#{checks_table(performance_rules)}" \
+      "<h3>Style (#{style_rules.size})</h3>#{checks_table(style_rules)}"
     end
 
     def checks_table(rules)

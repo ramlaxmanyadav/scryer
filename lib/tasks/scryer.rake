@@ -9,32 +9,35 @@ require "fileutils"
 # Ruby nil-or-empty checks only.
 namespace :scryer do
   desc "Run Scryer and write a report. Args are any mix of json/html/csv (which formats " \
-       "to write — default json,html), the token 'deps' (fold a dependency audit — OSV.dev " \
-       "vulnerable gems + insecure git/http sources, same checks as scryer:audit_dependencies " \
-       "— into this report instead of running it separately), plus at most one path (a " \
-       "directory when writing more than one format, or an exact file for a single format). " \
-       "Rake splits bracket args on every comma, so pass each token as its own item rather " \
-       "than one comma-joined string. e.g. rails scryer:report, rails 'scryer:report[html]', " \
+       "to write — default json,html), the token 'nodeps' (skip the dependency audit — OSV.dev " \
+       "vulnerable gems + insecure git/http sources — that otherwise runs by default; use for a " \
+       "fast, fully offline run), plus at most one path (a directory when writing more than one " \
+       "format, or an exact file for a single format). Rake splits bracket args on every comma, " \
+       "so pass each token as its own item rather than one comma-joined string. " \
+       "e.g. rails scryer:report, rails 'scryer:report[html]', " \
        "rails 'scryer:report[json,doc/security.json]', rails 'scryer:report[json,html]', " \
-       "rails 'scryer:report[html,deps]', rails 'scryer:report[csv]'"
+       "rails 'scryer:report[html,nodeps]', rails 'scryer:report[csv]'"
   task :report, [:format] do |_, args|
     root = defined?(Rails) ? Rails.root.to_s : Dir.pwd
     dirs = Scryer.configuration.dirs
 
     # Ignore the declared :format name and read every positional value Rake
     # was given (args.to_a) — the whole point is accepting a variable number
-    # of format/deps tokens plus one path, which a single named param can't do.
-    formats, path_arg, include_deps = parse_report_args(args.to_a)
+    # of format/nodeps tokens plus one path, which a single named param can't do.
+    formats, path_arg, run_deps = parse_report_args(args.to_a)
 
     skip_rules = Scryer.configuration.skip_rules
     puts "Scryer: skipping #{skip_rules.join(', ')}." if skip_rules.any?
 
     result = Scryer::Scanner.new(root: root, dirs: dirs, skip_rules: skip_rules).call
 
+    # Dependency auditing (OSV.dev) runs by default — a single scryer:report
+    # run is meant to cover the same ground as RuboCop + Brakeman +
+    # bundler-audit + Reek run separately. Pass the 'nodeps' token for a
+    # fast, fully offline run instead.
     dependency_findings = []
-    if include_deps
-      puts "Scryer: checking Gemfile.lock sources (offline)..."
-      puts "Scryer: querying OSV.dev for known vulnerabilities (needs network)..."
+    if run_deps
+      puts "Scryer: querying OSV.dev for known-vulnerable gems (needs network)..."
       dependency_findings = Scryer::DependencyAudit.insecure_sources(root) + Scryer::DependencyAudit.vulnerable_gems(root)
     end
 
@@ -65,12 +68,17 @@ namespace :scryer do
       File.write(path, content)
     end
 
-    puts "Scryer: #{result.files_scanned} files scanned, " \
-         "#{result.security_findings.size} security findings, " \
-         "#{result.performance_findings.size} performance findings, " \
-         "#{result.duplicate_groups.size} duplicate groups" \
-         "#{include_deps ? ", #{dependency_findings.size} dependency findings" : ""}."
-    puts "Report written to #{paths.values.join(', ')}"
+    ScryerTasks.print_summary(result: result, dependency_findings: dependency_findings, ran_deps: run_deps, paths: paths)
+
+    # Same gate as the `scryer` executable and scryer:audit_dependencies
+    # below: fail the task (and so the CI job running it) on any security or
+    # dependency finding, so `bin/rails scryer:report` gates a build the
+    # same way `brakeman` or `bundle-audit check` would. Performance/style
+    # findings are advisory only and never fail the task.
+    if result.security_findings.any? || dependency_findings.any?
+      abort("Scryer: found #{result.security_findings.size} security finding(s) and " \
+            "#{dependency_findings.size} dependency finding(s).")
+    end
   end
 
   desc "Check Gemfile.lock for known-vulnerable gem versions (via OSV.dev — needs network) " \
@@ -98,17 +106,17 @@ namespace :scryer do
 
   VALID_FORMATS = %w[json html csv].freeze
   EXTENSION_FOR_FORMAT = { "json" => "json", "html" => "html", "csv" => "csv" }.freeze
-  DEPS_TOKEN = "deps".freeze
+  NO_DEPS_TOKEN = "nodeps".freeze
 
   # tokens is every bracket arg Rake was given, e.g. %w[json doc/security.json] or
-  # %w[json html] or %w[html deps] or []. Returns [formats, path_arg,
-  # include_deps] — any token matching a known format is a format, the
-  # literal "deps" token opts into folding a dependency audit into the
-  # report, and at most one other token is allowed, which is the path.
+  # %w[json html] or %w[html nodeps] or []. Returns [formats, path_arg,
+  # run_deps] — any token matching a known format is a format, the literal
+  # "nodeps" token opts *out* of the dependency audit that otherwise runs by
+  # default, and at most one other token is allowed, which is the path.
   def parse_report_args(tokens)
     tokens = tokens.map { |t| blank_to_nil(t) }.compact
-    include_deps = tokens.any? { |t| t.downcase == DEPS_TOKEN }
-    tokens = tokens.reject { |t| t.downcase == DEPS_TOKEN }
+    run_deps = tokens.none? { |t| t.downcase == NO_DEPS_TOKEN }
+    tokens = tokens.reject { |t| t.downcase == NO_DEPS_TOKEN }
 
     format_tokens, other_tokens = tokens.partition { |t| VALID_FORMATS.include?(t.downcase) }
 
@@ -119,7 +127,7 @@ namespace :scryer do
     formats = format_tokens.map(&:downcase).uniq
     formats = %w[json html] if formats.empty?
 
-    [formats, other_tokens.first, include_deps]
+    [formats, other_tokens.first, run_deps]
   end
 
   # No path given: default filenames under tmp/. A path given with a single
@@ -168,5 +176,41 @@ module ScryerTasks
     output.empty? ? nil : output
   rescue StandardError
     nil
+  end
+
+  # The "one audit command" summary — a single scan's worth of every
+  # category Scryer covers (security, performance, duplicate/smelly code,
+  # dependencies), the same categories usually split across RuboCop +
+  # Brakeman + bundler-audit + Reek, side by side in one box.
+  def print_summary(result:, dependency_findings:, ran_deps:, paths:)
+    # "Code Quality" is the umbrella label for both duplicate-code groups
+    # and rule-based style findings (e.g. frozen_string_literal) — two
+    # different detectors, same broad concern, one row in the box.
+    code_quality = result.duplicate_groups.size + result.style_findings.size
+    deps_count = ran_deps ? dependency_findings.size : nil
+    total = result.security_findings.size + result.performance_findings.size + code_quality + (deps_count || 0)
+
+    rows = [
+      ["Security", result.security_findings.size],
+      ["Performance", result.performance_findings.size],
+      ["Code Quality", code_quality],
+      ["Dependencies", deps_count]
+    ]
+
+    divider = "─" * 32
+    puts ""
+    puts "Scryer Audit — #{result.files_scanned} files scanned"
+    puts divider
+    puts ""
+    rows.each { |label, count| puts summary_row(label, count) }
+    puts divider
+    puts summary_row("Total", total)
+    puts ""
+    paths.each { |format, path| puts "#{format.upcase} report: #{path}" }
+  end
+
+  def summary_row(label, count)
+    value = count.nil? ? "skipped (nodeps)" : "#{count} finding#{"s" unless count == 1}"
+    "#{label.ljust(14)}#{value.rjust(20)}"
   end
 end

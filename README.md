@@ -1,38 +1,168 @@
-# Scryer
+# Scryer — Ruby & Rails Code Security Auditor
 
-A static code analyzer for Rails apps, built on Ruby's own `Ripper` (stdlib — no Rails or
-`bundle install` needed to run the scan itself). Reports three things:
+Scryer is a Ruby static code analysis and security auditing tool. It analyzes Ruby and Rails
+projects, audits `Gemfile.lock` dependencies for known vulnerabilities, identifies potential
+security, performance, and code-quality issues, and gives you an actionable, human-reviewable
+suggestion for fixing each one.
 
-- **Security findings**: SQL injection via string interpolation, unpermitted mass assignment,
-  command injection, hardcoded API keys/secrets, unsafe deserialization (`Marshal.load`/
-  `YAML.load`/`JSON.load`), unescaped-HTML XSS risk (`.html_safe`/`raw`), CSRF protection gaps,
-  weak password hashing, and open redirects.
-- **Duplicate code**: near-duplicate methods across the codebase, via token-normalized similarity
-  (renamed variables/changed literals still count as "the same shape").
-- **Performance heuristics**: likely N+1 queries, missing pagination on index actions,
-  inefficient per-record save loops, and unbounded full-table iteration.
+Most Rails teams already run several separate tools to cover code quality and security: RuboCop
+for style, Brakeman for security, bundler-audit for dependency CVEs, Reek for code smells, plus
+whatever custom scripts glue their outputs together in CI — different gems, different config
+files, different report formats, different CI steps to maintain.
+
+**Scryer's job is to be the one audit command that covers all of it** — security vulnerabilities,
+performance problems, duplicate/smelly code, and dependency vulnerabilities — in a single scan
+with a single report:
+
+```bash
+gem install scryer
+scryer
+```
+
+```
+Scryer Audit — 236 files scanned
+────────────────────────────────
+
+Security                8 findings
+Performance            10 findings
+Code Quality          248 findings
+Dependencies           24 findings
+────────────────────────────────
+Total                 290 findings
+
+JSON report: tmp/scryer_report.json
+HTML report: tmp/scryer_report.html
+```
+
+That's real output from a scan of a live 236-file Rails app — not a mockup. See
+[Scryer vs RuboCop vs Brakeman vs bundler-audit](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit)
+below for exactly how it stacks up against the tools it's meant to consolidate.
+
+### What Scryer detects
+
+**Security**
+
+* SQL injection
+* Mass assignment
+* Command injection
+* Hardcoded secrets
+* Unsafe deserialization
+* XSS-prone HTML
+* CSRF gaps
+* Weak cryptography
+* Open redirects
+
+**Code quality**
+
+* Near-duplicate code
+* Repeated logic
+* Potentially problematic code patterns
+* Missing `frozen_string_literal` magic comment (the one deliberate, narrow style check — see
+  [comparison table](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit) for why not more)
+
+**Performance**
+
+* N+1 queries
+* Missing pagination
+* Inefficient per-record saves
+* Unbounded full-table iteration
+
+**Dependencies**
+
+* Known dependency vulnerabilities via OSV.dev
+* Insecure gem sources
+
+### Example findings
+
+Real output — three lines of deliberately flawed Rails code, scanned with plain `scryer`:
+
+```ruby
+def create
+  @invoice = Invoice.create(params[:invoice])
+end
+```
+
+```
+[CRITICAL] mass_assignment — app/controllers/invoices_controller.rb:3
+`create` receives `params` (or a subscript of it) directly, with no `.permit(...)` call — every
+attribute in the request can be set, including ones the form/API was never meant to expose (e.g.
+`admin`, `role_id`).
+
+fix: Wrap the params in a strong-parameters method, e.g. `create(order_params)` with
+`def order_params; params.require(:order).permit(:status, :total); end` — only the explicitly
+permitted keys get through.
+```
+
+```ruby
+Invoice.where("customer_name = '#{name}'")
+```
+
+```
+[CRITICAL] sql_injection — app/controllers/invoices_controller.rb:9
+`where` is called with a string built via interpolation, which lets user-controlled input change
+the SQL executed.
+
+fix: Use a parameterized form instead, e.g. `where("column = ?", value)` or the hash form
+`where(column: value)` — both let Active Record escape the value safely instead of interpolating
+it directly into SQL.
+```
+
+```ruby
+@invoices = Invoice.where(status: "open")
+@invoices.each { |invoice| invoice.account.name }
+```
+
+```
+[WARNING] n_plus_one_query — app/controllers/invoices_controller.rb:14
+`invoice.account` is called inside a loop — if `account` is an association, this issues a separate
+query per iteration instead of one batched query (a classic N+1).
+
+fix: Eager-load the association on the base query before the loop, e.g.
+`invoices = Model.includes(:account).where(...)` (or add `:account` to an existing `.includes(...)`
+call), so Rails fetches it in one extra query instead of one per record.
+```
+
+Every finding follows this shape, whichever category it's in: exactly where the issue is, why it
+matters, and a fix written against your actual code — not a generic paragraph you have to
+translate into your own file.
+
+### Reports
+
+Generate detailed JSON or self-contained HTML reports:
+
+```bash
+scryer -o report.json -o report.html
+```
+
+### Developer-friendly suggestions
+
+Every finding includes a human-reviewable suggested fix. Scryer never automatically modifies your source code.
+
+### Runtime analysis
+
+Scryer can optionally monitor ActiveRecord queries at runtime to detect N+1 queries and unused eager loading.
+
+### Designed for Ruby
+
+Scryer uses Ruby's standard-library `Ripper` parser, allowing source analysis without requiring Rails or Bundler to run the static scan itself.
 
 Several more things live alongside the static scan, each documented in its own section below:
 
 - **Skipping rules** ([Skipping rules](#skipping-rules)): silence a specific rule by `rule_id`
   (config-wide via `c.skip_rules`, or one-off via `--skip`) without editing or deleting it.
-- A **runtime query watcher** ([Runtime query watcher](#runtime-query-watcher)) that instruments a
-  *running* app to catch N+1 queries and unused eager loading as they actually happen — the same
-  broad goal as [Bullet](https://github.com/flyerhzm/bullet), built independently on a different
-  mechanism.
-- A **dependency audit** ([Dependency audit](#dependency-audit)) that checks `Gemfile.lock` against
-  [OSV.dev](https://osv.dev) for known-vulnerable gem versions and insecure sources — the same
-  broad goal as [bundler-audit](https://github.com/rubysec/bundler-audit), built independently on a
-  different data source.
+- A **dependency audit** ([Dependency audit](#dependency-audit)), on by default, that checks
+  `Gemfile.lock` against [OSV.dev](https://osv.dev) for known-vulnerable gem versions and insecure
+  sources — the same broad goal as [bundler-audit](https://github.com/rubysec/bundler-audit), built
+  independently on a different data source. Pass `--no-deps` (or the `nodeps` rake arg) for a fast,
+  fully offline run instead.
 - **AI-assisted fix suggestions** ([AI-assisted fix suggestions](#ai-assisted-fix-suggestions)),
   optional, provider-agnostic: rewrites each finding's `suggested_fix` against its actual code
   using an LLM you configure — any LLM, not a specific vendor.
 
-Every finding includes a `suggested_fix` — human-reviewable text explaining the issue with an
-example. **Nothing is auto-applied.** A security or performance fix needs a human's judgment
-about the surrounding code; this gem's job is to point at the issue and explain it clearly, not
-to rewrite your files. This holds whether `suggested_fix` came from a rule's static template or
-from the optional AI enrichment below — either way, it's text for a human to read and act on.
+**Nothing is auto-applied.** A security or performance fix needs a human's judgment about the
+surrounding code; this gem's job is to point at the issue and explain it clearly, not to rewrite
+your files. This holds whether `suggested_fix` came from a rule's static template or from the
+optional AI enrichment below — either way, it's text for a human to read and act on.
 
 ## A note on how this gem was actually verified
 
@@ -49,6 +179,50 @@ like Brakeman spends years building). Expect some false positives and false nega
 normal for this class of tool, not a bug. An already-guarded call can still get flagged since
 rules don't trace surrounding conditionals — always review a finding in its surrounding context
 before acting on it.
+
+## Scryer vs RuboCop vs Brakeman vs bundler-audit
+
+Scryer isn't trying to out-lint RuboCop or out-analyze Brakeman — where an existing tool
+specializes, it's still worth running on its own; style/lint conventions are almost entirely
+RuboCop's job, and Scryer stays out of that territory except for one narrow, deliberately-scoped
+check (see footnote below). What Scryer actually replaces is *stitching several of these together
+yourself*: it covers categories none of the others do alone (performance heuristics,
+duplicate-code detection, runtime query analysis), and folds the categories they *do* cover into
+one command and one report instead of several separate tools, configs, and CI steps.
+
+| Capability                               | Scryer | RuboCop  | Brakeman | bundler-audit |
+|-------------------------------------------|:------:|:--------:|:--------:|:-------------:|
+| Style/lint conventions                     | Partial [h] | ✅  | ❌       | ❌            |
+| Rails security scanning                    | ✅     | ❌       | ✅       | ❌            |
+| Performance heuristics                     | ✅     | Partial [a] | ❌    | ❌            |
+| Duplicate/similar code detection           | ✅     | Partial [b] | ❌    | ❌            |
+| Dependency vulnerability scanning          | ✅     | ❌       | ❌       | ✅            |
+| Runtime query analysis (N+1 in production) | ✅     | ❌       | ❌       | ❌            |
+| HTML report                                | ✅     | Partial [c] | ✅    | ❌            |
+| JSON report                                | ✅     | ✅       | ✅       | Limited [d]   |
+| Human-reviewable fix suggestions           | ✅     | Partial [e] | Partial [f] | Limited [g] |
+| Single command covering all of the above   | ✅     | ❌       | ❌       | ❌            |
+
+- **[a]** `rubocop-performance` adds some Ruby/Rails performance cops, but nothing like N+1-query
+  or missing-pagination detection.
+- **[b]** A handful of cops catch exact-duplicate patterns (e.g. `Lint/DuplicateMethods`) — no
+  near-duplicate/similarity detection across methods.
+- **[c]** RuboCop's built-in HTML formatter is a plain findings list, not an interactive report.
+- **[d]** bundler-audit's output is primarily console text; no first-class JSON formatter.
+- **[e]** RuboCop's `-A` auto-corrects many style violations directly — an automatic rewrite, not
+  a human-reviewable explanation, and only for auto-correctable cops.
+- **[f]** Brakeman's warnings describe the issue and a confidence level, not a concrete
+  before/after code fix.
+- **[g]** bundler-audit names the patched version to upgrade to; no code-level remediation (it
+  doesn't operate on your code at all, only `Gemfile.lock`).
+- **[h]** One check only: a missing `# frozen_string_literal: true` magic comment
+  (`frozen_string_literal`, info severity). Everything else in RuboCop's style/lint domain —
+  naming, layout, quote style, line length, and hundreds more — is intentionally out of scope; see
+  [Skipping rules](#skipping-rules) if you don't want even this one.
+
+If you already run RuboCop for style, keep it — Scryer isn't a replacement for it. If you're
+currently running Brakeman + bundler-audit + a duplicate-code linter as three separate steps,
+Scryer is the "run one thing instead" option.
 
 ## Install
 
@@ -80,13 +254,16 @@ scanned, the branch label).
 bin/rails scryer:report   # writes tmp/scryer_report.{json,html}
 ```
 
-By default this writes both `tmp/scryer_report.json` and `tmp/scryer_report.html`. Both format
-and output path are configurable via task args — any mix of `json`, `html`, `csv` plus at most one
-path (quote the whole thing so your shell doesn't eat the brackets/commas, e.g.
+By default this writes both `tmp/scryer_report.json` and `tmp/scryer_report.html`, and includes a
+dependency audit against `Gemfile.lock` (needs network — see [Dependency audit](#dependency-audit);
+pass the `nodeps` arg for a fast, fully offline run instead). Format and output path are
+configurable via task args — any mix of `json`, `html`, `csv` plus at most one path (quote the
+whole thing so your shell doesn't eat the brackets/commas, e.g.
 `bin/rails 'scryer:report[json,doc/security_report.json]'`). Rake splits bracket args on every
 comma, so each format is its own item in the list rather than one comma-joined string
-(`scryer:report[json,html]` is two args, not `"json,html"` as one). At most one non-format token
-is accepted per call; giving two raises an error rather than guessing which one you meant.
+(`scryer:report[json,html]` is two args, not `"json,html"` as one). At most one non-format,
+non-`nodeps` token is accepted per call; giving two raises an error rather than guessing which one
+you meant.
 
 Outside a Rails app (or in CI, or anywhere you don't want a rake task), the gem also ships a
 `scryer` executable — same idea as `brakeman -o report.json`, with `-o` repeatable and format
@@ -97,13 +274,17 @@ scryer                                    # scans ., writes tmp/scryer_report.{j
 scryer -o report.json                     # just one file, exact path, format from extension
 scryer -o report.json -o report.html      # as many outputs as you like, one -o each
 scryer -p /path/to/app -o /tmp/out.html   # -p sets the root to scan (default: cwd)
+scryer --no-deps                          # skip the dependency audit for a fast offline run
 scryer --help                             # full option list (--project-name, --branch, --version, ...)
 ```
 
-It exits `0` when the scan is clean and `1` when there's at least one security finding, so
-`scryer -o report.json` can gate a CI job the same way `brakeman -o report.json` does. A `2` exit
-means a usage error (bad flag, unrecognized output extension) rather than anything about the scan
-itself.
+Console output is a summary box across every category — see the box in the intro above for a real
+example — followed by where each report was written.
+
+It exits `0` when the scan is clean and `1` when there's at least one security or dependency
+finding, so `scryer -o report.json` can gate a CI job the same way `brakeman -o report.json` does.
+A `2` exit means a usage error (bad flag, unrecognized output extension) rather than anything
+about the scan itself.
 
 Or use the scanning engine directly as a library:
 
@@ -119,7 +300,7 @@ of checks that ran, a breakdown of warnings by type, every finding in detail, an
 groups — laid out similarly to a Brakeman report. `tmp/scryer_report.json` has the same data in
 machine-readable form, for feeding into your own dashboard or CI gate. A third format, `.csv`
 (`scryer -o report.csv` / `rails 'scryer:report[csv]'`), is a flat one-row-per-finding table
-(security + performance findings, plus dependency findings if `--include-deps`/`deps` was used) —
+(security + performance findings, plus dependency findings unless `--no-deps`/`nodeps` was used) —
 handy for dropping into a spreadsheet or importing into a ticketing tool. It skips duplicate-code
 groups, which don't reduce to a single actionable row.
 
@@ -222,12 +403,14 @@ library, so it works the same whether or not this happens to run under Bundler. 
 source was read or copied to build this.
 
 ```bash
-bin/rails scryer:audit_dependencies   # inside a Rails app
+bin/rails scryer:audit_dependencies   # inside a Rails app — dependency audit only, no static scan
 ```
 
-This is the one part of Scryer that needs a live network connection (to reach OSV.dev) — so
-unlike the static scan, it's not part of the default `scryer`/`scryer:report` run; call it
-explicitly, the same way `bundle-audit check` is a separate command from your test suite. It exits
+This is the one part of Scryer that needs a live network connection (to reach OSV.dev), and it
+runs automatically as part of every `scryer`/`scryer:report` scan — pass `--no-deps` (CLI) or the
+`nodeps` arg (rake) for a fast, fully offline run instead. `scryer:audit_dependencies` above (and
+`scryer --audit-deps` below) are for when you want *only* the dependency audit, the same way
+`bundle-audit check` is a separate, standalone command from your test suite. Either way it exits
 non-zero if anything is found, so it can gate CI.
 
 Two checks run, and either can be called on its own as a library:
@@ -248,9 +431,11 @@ Scryer::DependencyAudit.vulnerable_gems(Rails.root.to_s)   # needs network (OSV.
   and the fixed version(s) to upgrade to.
 
 **From the `scryer` executable** (outside a Rails app, or in CI): `scryer --audit-deps` runs the
-same two checks standalone, same output/exit-code behavior as the rake task. `scryer --include-deps`
-folds them into the normal `-o` report instead — one HTML/JSON/CSV file covering static findings
-*and* dependency findings together. And for a single gem, without touching `Gemfile.lock` at all:
+same two checks standalone (no static scan), same output/exit-code behavior as the rake task above.
+Plain `scryer` already folds them into the normal `-o` report — one HTML/JSON/CSV file covering
+static findings *and* dependency findings together — so `--audit-deps` is only for when you want
+dependency findings *without* the static scan. And for a single gem, without touching
+`Gemfile.lock` at all:
 
 ```bash
 scryer --check-gem rack            # every advisory ever filed against rack, any version
@@ -360,8 +545,12 @@ in a host app for the full description (also in
 
 ## Extending it
 
-Every rule is a small class extending `Scryer::Rule` — see `lib/scryer/rules/*.rb`
-(security) and `lib/scryer/performance_rules/*.rb` (performance) for the pattern. A new
-rule file dropped into either directory is picked up automatically (rules self-register via
-`Rule.inherited` — no manual wiring needed). `Scryer::Ast` has the tree-walking
-helpers used throughout.
+Every rule is a small class extending `Scryer::Rule` — see `lib/scryer/rules/*.rb` (security),
+`lib/scryer/performance_rules/*.rb` (performance), and `lib/scryer/style_rules/*.rb` (style) for
+the pattern. A new rule file dropped into any of the three directories is picked up automatically
+(rules self-register via `Rule.inherited` — no manual wiring needed, just `self.category =
+"security"|"performance"|"style"`). `Scryer::Ast` has the tree-walking helpers used throughout.
+
+## License
+
+MIT licensed.

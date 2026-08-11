@@ -4,25 +4,41 @@ Gem::Specification.new do |spec|
   spec.name        = "scryer"
   spec.version     = Scryer::VERSION
   spec.authors     = ["Ram Laxman Yadav"]
-  spec.summary     = "Static code analysis for Rails apps: security vulnerabilities, duplicate code, and performance heuristics."
+  spec.summary     = "Ruby/Rails security & quality auditor — one command instead of Brakeman + bundler-audit + Reek."
   spec.description = <<~DESC
-    Scans a Rails app's own source with Ruby's stdlib Ripper parser (no Rails/bundler needed to
-    run the scan itself) and reports: security findings (SQL injection, mass assignment, command
-    injection, hardcoded secrets, unsafe deserialization, XSS-prone unescaped HTML, CSRF gaps,
-    weak crypto, open redirects), near-duplicate code (token-normalized similarity across
-    methods), and performance heuristics (N+1 queries, missing pagination, inefficient per-record
-    save loops, unbounded full-table iteration). Every finding includes a human-reviewable
-    suggested fix — nothing is auto-applied. Writes a detailed report as JSON and/or
-    self-contained HTML (tmp/scryer_report.{json,html}). Ships a `scryer` executable for
-    running outside a Rails app too, e.g. `scryer -o report.json -o report.html`. Also includes a
-    runtime query watcher (N+1 / unused-eager-load detection via ActiveRecord instrumentation,
-    opt-in) and a dependency vulnerability + insecure-source audit against OSV.dev.
+    One scan, one report: security, performance, duplicate-code, and dependency audits for Ruby
+    and Rails — the ground Brakeman, bundler-audit, Reek, and custom glue scripts usually split
+    between them, covered by a single `scryer` command. (Style/lint is RuboCop's job — Scryer
+    doesn't touch that.)
+
+    Detects SQL injection, mass assignment, hardcoded secrets, XSS, weak crypto, and more; N+1
+    queries, missing pagination, and other performance heuristics; near-duplicate code; and
+    known-vulnerable gems via a live OSV.dev dependency audit — on by default, every run.
+
+    Every finding includes a human-reviewable suggested fix — never auto-applied, optionally
+    rewritten against your actual code by any LLM you configure. Reports in JSON, self-contained
+    HTML, or CSV. Zero runtime dependencies beyond Ruby's own stdlib.
   DESC
-  spec.homepage              = "https://github.com/ramlaxmanyadav/scryer"
+  # The docs site (below) is the project's actual front door — a real landing
+  # page with the "why", the audit-box demo, and the comparison table — so it
+  # gets top billing as spec.homepage. The GitHub repo is still one click
+  # away via source_code_uri.
+  spec.homepage              = "https://ramlaxmanyadav.github.io/scryer/"
   spec.license                  = "MIT"
   spec.required_ruby_version = ">= 2.7.0"
 
-  spec.files = Dir.glob("{lib,exe}/**/*") + %w[README.md]
+  # `homepage_uri` is deliberately omitted from metadata — it would just
+  # duplicate spec.homepage above with the same URL, which RubyGems warns
+  # about at build time (only one of the two gets shown on the gem page).
+  spec.metadata = {
+    "source_code_uri"       => "https://github.com/ramlaxmanyadav/scryer",
+    "documentation_uri"     => "https://ramlaxmanyadav.github.io/scryer/",
+    "changelog_uri"         => "https://github.com/ramlaxmanyadav/scryer/blob/main/CHANGELOG.md",
+    "bug_tracker_uri"       => "https://github.com/ramlaxmanyadav/scryer/issues",
+    "rubygems_mfa_required" => "true"
+  }
+
+  spec.files = Dir.glob("{lib,exe}/**/*") + %w[README.md CHANGELOG.md LICENSE.txt]
   spec.bindir = "exe"
   spec.executables = ["scryer"]
   spec.require_paths = ["lib"]
