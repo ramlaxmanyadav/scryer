@@ -353,7 +353,7 @@ module Scryer
           </div>
           <p>#{escape(f["message"])}</p>
           #{f["code_snippet"] ? "<pre>#{escape(f["code_snippet"])}</pre>" : ""}
-          <div class="fix"><strong>Suggested fix:</strong> #{escape(f["suggested_fix"])}</div>
+          <div class="fix"><strong>Suggested fix:</strong>#{render_markdown(f["suggested_fix"])}</div>
         </div>
       ROW
     end
@@ -421,13 +421,55 @@ module Scryer
           </div>
           <p>#{escape(f["message"])}</p>
           #{patched.empty? ? "" : "<p class=\"loc\">Patched version(s): #{escape(patched.join(", "))}</p>"}
-          <div class="fix"><strong>Suggested fix:</strong> #{escape(f["suggested_fix"])}</div>
+          <div class="fix"><strong>Suggested fix:</strong>#{render_markdown(f["suggested_fix"])}</div>
         </div>
       ROW
     end
 
     def escape(text)
       text.to_s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;")
+    end
+
+    CODE_FENCE = /```\w*\n?(.*?)```/m
+    BOLD = /\*\*(.+?)\*\*/
+    INLINE_CODE = /`([^`]+?)`/
+
+    # Suggested-fix text is always human-written prose, whether it came from
+    # a rule's static template (occasional inline `code`) or an LLM rewrite
+    # (often full Markdown: **bold**, ```fenced code```, paragraphs) — see
+    # AiFixSuggester's prompts, which explicitly ask for a
+    # "before/after code example". Rendering it as one plain escaped string
+    # left literal ** and ``` visible in the HTML report instead of actual
+    # formatting. This renders the handful of constructs those two sources
+    # actually produce; anything unrecognized just passes through as escaped
+    # text, same as before.
+    #
+    # Every code path here escapes raw text *before* adding any HTML tags of
+    # its own, so nothing in `text` (however untrusted — this may be verbatim
+    # LLM output) can inject markup; the only unescaped HTML is the literal
+    # tag strings this method writes itself.
+    def render_markdown(text)
+      return "" if text.nil?
+
+      html = +""
+      pos = 0
+      text.to_s.scan(CODE_FENCE) do
+        match = Regexp.last_match
+        html << render_prose(text[pos...match.begin(0)])
+        html << "<pre>#{escape(match[1].strip)}</pre>"
+        pos = match.end(0)
+      end
+      html << render_prose(text[pos..])
+      html
+    end
+
+    def render_prose(text)
+      return "" if text.nil? || text.strip.empty?
+
+      text.strip.split(/\n{2,}/).map do |paragraph|
+        formatted = escape(paragraph.strip).gsub(BOLD, '<strong>\1</strong>').gsub(INLINE_CODE, '<code>\1</code>')
+        "<p>#{formatted.gsub("\n", "<br>")}</p>"
+      end.join
     end
 
     def static_csv_row(f)
@@ -474,7 +516,13 @@ module Scryer
       .badge.kind { background: #ede9fe; color: #5b21b6; }
       .loc { color: #64748b; font-size: 0.8rem; }
       pre { background: #0f172a; color: #e2e8f0; padding: 0.5rem 0.75rem; border-radius: 6px; overflow-x: auto; font-size: 0.8rem; }
+      code { background: #e2e8f0; color: #334155; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
       .fix { background: #eef2ff; border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.875rem; }
+      .fix > strong { display: block; margin-bottom: 0.35rem; }
+      .fix p { margin: 0 0 0.5rem; }
+      .fix p:last-child { margin-bottom: 0; }
+      .fix pre { margin: 0.5rem 0 0; }
+      .fix pre:last-child { margin-bottom: 0; }
       .dup-member { margin-top: 0.5rem; }
       .dup-member:first-child { margin-top: 0; }
       .muted { color: #94a3b8; }

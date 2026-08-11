@@ -11,6 +11,14 @@ All notable changes to this project are documented here. Format loosely follows
   `config/initializers/` to autoload, so AI-assisted fix suggestions and other config were
   previously unreachable outside Rails. See the README's AI-assisted fix suggestions section for
   a full step-by-step for both the Rails and standalone paths.
+- Fixed: the HTML report rendered a finding's `suggested_fix` as one plain escaped string, so
+  Markdown from an AI-rewritten fix (`**bold**`, ```` ```fenced code``` ````) showed up as literal
+  asterisks/backticks instead of formatted text. Added a small Markdown-to-HTML renderer
+  (bold, inline code, fenced code blocks, paragraphs) used for every `suggested_fix` — static
+  template text or LLM rewrite, security/performance/style/dependency findings alike. Raw text is
+  always escaped before any tag is added, so this doesn't open an HTML/script injection path even
+  for a fully untrusted LLM response; JSON/CSV output is unaffected and still carries the original
+  raw text.
 
 ## [0.2.0] - 2026-08-11
 
