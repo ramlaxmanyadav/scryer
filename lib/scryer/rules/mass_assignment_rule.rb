@@ -77,16 +77,13 @@ module Scryer
         !NON_MODEL_RECEIVERS.include?(const_node[1])
       end
 
-      # True if `node` is `params`, `params[:x]`, or contains such a reference
+      # True if `node` references `params` (see Ast.references_params?)
       # without a `.permit`/`.permit!` call wrapping it (permit! is itself
       # flagged as unsafe too, so it doesn't count as "safe").
       def references_raw_params?(node)
-        return false unless node.is_a?(Array)
         return false if has_permit_call?(node)
 
-        Ast.each_node(node).any? do |n|
-          Ast.tagged?(n, :vcall, :var_ref, :fcall) && Ast.ident_text(n[1]) == "params"
-        end
+        Ast.references_params?(node)
       end
 
       def has_permit_call?(node)

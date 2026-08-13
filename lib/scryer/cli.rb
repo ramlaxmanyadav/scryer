@@ -9,7 +9,7 @@ module Scryer
   # only needed for this CLI entry point, not when the gem is required
   # inside a host app.
   class CLI
-    EXTENSION_FORMATS = { ".json" => "json", ".html" => "html", ".htm" => "html", ".csv" => "csv" }.freeze
+    EXTENSION_FORMATS = { ".json" => "json", ".html" => "html", ".htm" => "html", ".csv" => "csv", ".sarif" => "sarif" }.freeze
 
     def initialize(argv, stdout: $stdout, stderr: $stderr)
       @argv = argv
@@ -50,7 +50,8 @@ module Scryer
       dependency_findings = []
       if ran_deps
         @stdout.puts "Scryer: querying OSV.dev for known-vulnerable gems (needs network)..."
-        dependency_findings = DependencyAudit.insecure_sources(root) + DependencyAudit.vulnerable_gems(root)
+        dependency_findings = DependencyAudit.insecure_sources(root) + DependencyAudit.vulnerable_gems(root) +
+                               DependencyAudit.ruby_eol_check(root) + DependencyAudit.credentials_exposure_check(root)
       end
 
       if Scryer.configuration.ai_client
@@ -71,7 +72,7 @@ module Scryer
       outputs = options[:outputs].empty? ? default_outputs(root) : options[:outputs]
       outputs.each { |path| write_report(renderer, path) }
 
-      print_summary(result: result, dependency_findings: dependency_findings, ran_deps: ran_deps, outputs: outputs)
+      print_summary(result: result, dependency_findings: dependency_findings, ran_deps: ran_deps, outputs: outputs, renderer: renderer)
 
       result.security_findings.empty? && dependency_findings.empty? ? 0 : 1
     rescue UsageError => e
@@ -91,23 +92,33 @@ module Scryer
 
       @stdout.puts "Scryer: querying OSV.dev for known vulnerabilities (needs network)..."
       vulnerable = DependencyAudit.vulnerable_gems(root)
+      ruby_eol = DependencyAudit.ruby_eol_check(root)
+      credentials_exposure = DependencyAudit.credentials_exposure_check(root)
 
-      (insecure + vulnerable).each do |f|
-        label = f.kind == "insecure_source" ? "[#{f.severity.upcase}] #{f.message}" : "[#{f.severity.upcase}] #{f.gem_name} #{f.installed_version} - #{f.advisory_id}: #{f.title}"
-        @stdout.puts label
+      (insecure + vulnerable + ruby_eol + credentials_exposure).each do |f|
+        @stdout.puts "[#{f.severity.upcase}] #{dependency_label(f)}"
         @stdout.puts "  fix: #{f.suggested_fix}"
       end
 
-      total = insecure.size + vulnerable.size
-      @stdout.puts "\nScryer: #{total} dependency finding(s) (#{insecure.size} insecure source, #{vulnerable.size} vulnerable gem)."
+      total = insecure.size + vulnerable.size + ruby_eol.size + credentials_exposure.size
+      @stdout.puts "\nScryer: #{total} dependency finding(s) (#{insecure.size} insecure source, " \
+                   "#{vulnerable.size} vulnerable gem, #{ruby_eol.size} Ruby EOL, " \
+                   "#{credentials_exposure.size} credentials exposure)."
       total.positive? ? 1 : 0
+    end
+
+    def dependency_label(f)
+      return f.message if f.kind == "insecure_source"
+      return "#{f.gem_name} #{f.installed_version} - #{f.advisory_id}: #{f.title}" if f.advisory_id
+
+      "#{f.gem_name} #{f.installed_version}: #{f.title}"
     end
 
     # The "one audit command" summary — a single scan's worth of every
     # category Scryer covers (security, performance, duplicate/smelly code,
     # dependencies), the same categories usually split across RuboCop +
     # Brakeman + bundler-audit + Reek, side by side in one box.
-    def print_summary(result:, dependency_findings:, ran_deps:, outputs:)
+    def print_summary(result:, dependency_findings:, ran_deps:, outputs:, renderer:)
       # "Code Quality" is the umbrella label for both duplicate-code groups
       # and rule-based style findings (e.g. frozen_string_literal) — two
       # different detectors, same broad concern, one row in the box.
@@ -131,12 +142,27 @@ module Scryer
       @stdout.puts divider
       @stdout.puts summary_row("Total", total)
       @stdout.puts ""
+      print_top_priorities(renderer.top_risks)
       outputs.each { |path| @stdout.puts "#{format_for(path).upcase} report: #{path}" }
     end
 
     def summary_row(label, count)
       value = count.nil? ? "skipped (--no-deps)" : "#{count} finding#{"s" unless count == 1}"
       "#{label.ljust(14)}#{value.rjust(20)}"
+    end
+
+    # The categories above are counted separately, but nothing else ranks
+    # across them — this is what actually backs "tells you what to fix
+    # first" rather than just splitting findings into four buckets. Same
+    # data ReportRenderer#top_risks already sorts for the HTML report.
+    def print_top_priorities(risks)
+      return if risks.empty?
+
+      @stdout.puts "Top priorities:"
+      risks.each_with_index do |r, i|
+        @stdout.puts "  #{i + 1}. [#{r[:severity]}] #{r[:category]} — #{r[:label]} (#{r[:location]})"
+      end
+      @stdout.puts ""
     end
 
     # One-off OSV.dev lookup for a single gem — no Gemfile.lock, no scan,
@@ -165,7 +191,7 @@ module Scryer
         opts.banner = "Usage: scryer [options]"
         opts.on("-o PATH", "--output PATH",
                 "Write a report to PATH (repeatable). Format is inferred from the " \
-                "extension: .json, .html, or .csv.") { |v| options[:outputs] << v }
+                "extension: .json, .html, .csv, or .sarif.") { |v| options[:outputs] << v }
         opts.on("-p PATH", "--path PATH", "Root directory to scan (default: current directory).") { |v| options[:path] = v }
         opts.on("-r PATH", "--require PATH",
                 "Require a Ruby file before scanning (repeatable) — the file can call " \
@@ -212,6 +238,7 @@ module Scryer
       content = case format
                 when "json" then renderer.as_json
                 when "csv" then renderer.as_csv
+                when "sarif" then renderer.as_sarif
                 else renderer.as_html
                 end
 

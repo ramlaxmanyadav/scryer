@@ -1,18 +1,19 @@
-# Scryer — Ruby & Rails Code Security Auditor
+# Scryer — Ruby & Rails Application Security & Risk Auditor
 
-Scryer is a Ruby static code analysis and security auditing tool. It analyzes Ruby and Rails
-projects, audits `Gemfile.lock` dependencies for known vulnerabilities, identifies potential
-security, performance, and code-quality issues, and gives you an actionable, human-reviewable
-suggestion for fixing each one.
+Scryer scans a Ruby/Rails codebase and answers a different question than a single-purpose linter
+does: not just "what's wrong," but **what's actually worth fixing first**. It looks across
+security vulnerabilities, performance problems, dependency risk, and code quality in one pass,
+ranks what it finds by severity, and surfaces the handful of issues that matter most at the top of
+every report — with a human-reviewable suggested fix for each one.
 
-Most Rails teams already run several separate tools to cover code quality and security: RuboCop
-for style, Brakeman for security, bundler-audit for dependency CVEs, Reek for code smells, plus
-whatever custom scripts glue their outputs together in CI — different gems, different config
-files, different report formats, different CI steps to maintain.
-
-**Scryer's job is to be the one audit command that covers all of it** — security vulnerabilities,
-performance problems, duplicate/smelly code, and dependency vulnerabilities — in a single scan
-with a single report:
+Brakeman is very good at finding security patterns in Rails apps — years of deep taint/data-flow
+analysis that Scryer's heuristics don't try to match (see the honest comparison below). But a
+security pattern match in isolation doesn't tell you whether it's the most urgent thing on your
+plate this week, or the fifth-most: is that one SQL-injection-shaped call more or less pressing
+than the vulnerable gem sitting in your `Gemfile.lock`, or the N+1 query burning production
+database time right now? Answering that means looking at security, performance, dependencies, and
+code quality *together*, not as four separate tool outputs to reconcile by hand. That's Scryer's
+job:
 
 ```bash
 gem install scryer
@@ -23,20 +24,31 @@ scryer
 Scryer Audit — 236 files scanned
 ────────────────────────────────
 
-Security                8 findings
+Security               12 findings
 Performance            10 findings
 Code Quality          248 findings
 Dependencies           24 findings
 ────────────────────────────────
-Total                 290 findings
+Total                 294 findings
+
+Top priorities:
+  1. [critical] security — mass_assignment (app/helpers/api/v1/create_charge_helper.rb:45)
+  2. [critical] security — mass_assignment (app/helpers/api/v1/terminal/terminal_helper.rb:92)
+  3. [critical] security — mass_assignment (app/controllers/api/v1/payouts_controller.rb:8)
+  4. [critical] security — sql_injection (app/controllers/concerns/payment_method_helper.rb:12)
+  5. [critical] security — sql_injection (app/controllers/concerns/payment_method_helper.rb:21)
 
 JSON report: tmp/scryer_report.json
 HTML report: tmp/scryer_report.html
 ```
 
-That's real output from a scan of a live 236-file Rails app — not a mockup. See
+That's real output from a scan of a live 236-file Rails app — not a mockup. "Top priorities" is
+the same severity ranking [`ReportRenderer#top_risks`](lib/scryer/report_renderer.rb) applies
+across *all* categories — security, dependencies, performance, code quality — not just within
+each one; in the HTML report it's at the top of the Findings section, ahead of the 294 individual
+findings underneath it. See
 [Scryer vs RuboCop vs Brakeman vs bundler-audit](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit)
-below for exactly how it stacks up against the tools it's meant to consolidate.
+below for exactly how this differs from what those tools do.
 
 ### What Scryer detects
 
@@ -45,12 +57,28 @@ below for exactly how it stacks up against the tools it's meant to consolidate.
 * SQL injection
 * Mass assignment
 * Command injection
-* Hardcoded secrets
+* Hardcoded secrets (and hardcoded HTTP Basic Auth credentials)
 * Unsafe deserialization
 * XSS-prone HTML
 * CSRF gaps
 * Weak cryptography
 * Open redirects
+* Server-side request forgery (SSRF)
+* Path traversal
+* Insecure direct object references (IDOR) — the least precise check in the gem; see
+  [comparison table](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit) for the false-positive tradeoff
+* Authentication filters explicitly skipped (`skip_before_action`)
+* Rails security configuration: disabled HTTPS enforcement, session cookies missing the secure
+  flag, the Marshal cookie serializer, disabled default security headers (`X-Frame-Options`,
+  `X-Content-Type-Options`, Content-Security-Policy), Action Cable request forgery protection
+  disabled, a hardcoded `secret_key_base`
+* Active Storage attachments without a content-type allowlist, or served with inline disposition
+* CORS misconfiguration (wildcard origin combined with `credentials: true`)
+* Insecure JWT usage (`JWT.decode` with signature verification disabled, `algorithm: 'none'`, or a
+  hardcoded secret)
+* Background jobs (`perform_async`/`perform_later`/`perform_now`) passed raw `params` — risks
+  leaking request data into Sidekiq/ActiveJob logs, Redis, or the Sidekiq web UI
+* GraphQL schemas with no query depth/complexity limit (`max_depth`/`max_complexity`)
 
 **Code quality**
 
@@ -71,6 +99,8 @@ below for exactly how it stacks up against the tools it's meant to consolidate.
 
 * Known dependency vulnerabilities via OSV.dev
 * Insecure gem sources
+* Ruby version end-of-life (no more security patches published for it, for any issue)
+* `config/master.key` present on disk with no matching `.gitignore` entry
 
 ### Example findings
 
@@ -182,25 +212,29 @@ before acting on it.
 
 ## Scryer vs RuboCop vs Brakeman vs bundler-audit
 
-Scryer isn't trying to out-lint RuboCop or out-analyze Brakeman — where an existing tool
-specializes, it's still worth running on its own; style/lint conventions are almost entirely
-RuboCop's job, and Scryer stays out of that territory except for one narrow, deliberately-scoped
-check (see footnote below). What Scryer actually replaces is *stitching several of these together
-yourself*: it covers categories none of the others do alone (performance heuristics,
-duplicate-code detection, runtime query analysis), and folds the categories they *do* cover into
-one command and one report instead of several separate tools, configs, and CI steps.
+Brakeman is the deeper, more mature tool for the security categories it's spent years on — real
+taint/data-flow analysis, not heuristic pattern-matching (footnote [i]). RuboCop owns style/lint
+conventions; Scryer stays out of that territory except for one narrow, deliberately-scoped check
+(footnote [h]). Scryer isn't trying to out-analyze either of them at their own specialty. What it
+does instead: look at security, performance, dependency, and code-quality findings *together* and
+rank the result by severity, so "what should I fix first" has one answer instead of four separate
+tool outputs (and four different severity scales) to reconcile by hand — see footnote [j]. If you
+already run Brakeman for its deeper security analysis or RuboCop for style, keep doing that; Scryer
+sits alongside them and adds the cross-category picture neither one (nor bundler-audit) produces.
 
 | Capability                               | Scryer | RuboCop  | Brakeman | bundler-audit |
 |-------------------------------------------|:------:|:--------:|:--------:|:-------------:|
 | Style/lint conventions                     | Partial [h] | ✅  | ❌       | ❌            |
-| Rails security scanning                    | ✅     | ❌       | ✅       | ❌            |
+| Rails security scanning                    | ✅ [i] | ❌       | ✅       | ❌            |
 | Performance heuristics                     | ✅     | Partial [a] | ❌    | ❌            |
 | Duplicate/similar code detection           | ✅     | Partial [b] | ❌    | ❌            |
 | Dependency vulnerability scanning          | ✅     | ❌       | ❌       | ✅            |
 | Runtime query analysis (N+1 in production) | ✅     | ❌       | ❌       | ❌            |
 | HTML report                                | ✅     | Partial [c] | ✅    | ❌            |
 | JSON report                                | ✅     | ✅       | ✅       | Limited [d]   |
+| SARIF report (GitHub Code Scanning, etc.)  | ✅     | ❌       | ✅       | ❌            |
 | Human-reviewable fix suggestions           | ✅     | Partial [e] | Partial [f] | Limited [g] |
+| Cross-category risk ranking ("fix this first") | ✅ [j] | ❌  | ❌      | ❌            |
 | Single command covering all of the above   | ✅     | ❌       | ❌       | ❌            |
 
 - **[a]** `rubocop-performance` adds some Ruby/Rails performance cops, but nothing like N+1-query
@@ -219,10 +253,24 @@ one command and one report instead of several separate tools, configs, and CI st
   (`frozen_string_literal`, info severity). Everything else in RuboCop's style/lint domain —
   naming, layout, quote style, line length, and hundreds more — is intentionally out of scope; see
   [Skipping rules](#skipping-rules) if you don't want even this one.
+- **[i]** Heuristic pattern-matching, not taint/data-flow analysis — Brakeman traces whether user
+  input can actually *reach* a sink; Scryer checks whether a known-dangerous call shape and a
+  `params` reference appear in the same expression. That's a real precision gap on the harder
+  checks especially (`idor` in particular has real false-positive risk — see
+  [What Scryer detects](#what-scryer-detects)), and it's why every finding says "review this,"
+  never "this is definitely a bug."
+- **[j]** Each tool ranks findings within its own domain at best (e.g. Brakeman's per-warning
+  confidence level). None of them combine security, performance, dependency, and code-quality
+  findings into one ranked list — that's a different question than any single tool is built to
+  answer. `ReportRenderer#top_risks` sorts every severity-bearing finding from a scan (across all
+  four categories) by severity, shown as "Top priorities" in the console summary and at the top of
+  the HTML report — see the example near the top of this README.
 
-If you already run RuboCop for style, keep it — Scryer isn't a replacement for it. If you're
-currently running Brakeman + bundler-audit + a duplicate-code linter as three separate steps,
-Scryer is the "run one thing instead" option.
+Brakeman's security analysis and RuboCop's style checks are still worth running on their own —
+Scryer doesn't try to replace either, and running it alongside them costs nothing (different tools,
+different config files, no shared state). What Scryer adds is the view none of them produce alone:
+one ranked list of what's actually most worth fixing, built from security, performance,
+dependency, and code-quality findings together.
 
 ## Install
 
@@ -257,8 +305,8 @@ bin/rails scryer:report   # writes tmp/scryer_report.{json,html}
 By default this writes both `tmp/scryer_report.json` and `tmp/scryer_report.html`, and includes a
 dependency audit against `Gemfile.lock` (needs network — see [Dependency audit](#dependency-audit);
 pass the `nodeps` arg for a fast, fully offline run instead). Format and output path are
-configurable via task args — any mix of `json`, `html`, `csv` plus at most one path (quote the
-whole thing so your shell doesn't eat the brackets/commas, e.g.
+configurable via task args — any mix of `json`, `html`, `csv`, `sarif` plus at most one path (quote
+the whole thing so your shell doesn't eat the brackets/commas, e.g.
 `bin/rails 'scryer:report[json,doc/security_report.json]'`). Rake splits bracket args on every
 comma, so each format is its own item in the list rather than one comma-joined string
 (`scryer:report[json,html]` is two args, not `"json,html"` as one). At most one non-format,
@@ -298,11 +346,55 @@ Open `tmp/scryer_report.html` in a browser — it's a single self-contained file
 external assets, works offline) with an overview, a summary of counts by severity, the full list
 of checks that ran, a breakdown of warnings by type, every finding in detail, and duplicate-code
 groups — laid out similarly to a Brakeman report. `tmp/scryer_report.json` has the same data in
-machine-readable form, for feeding into your own dashboard or CI gate. A third format, `.csv`
-(`scryer -o report.csv` / `rails 'scryer:report[csv]'`), is a flat one-row-per-finding table
+machine-readable form, for feeding into your own dashboard or CI gate. `.csv`
+(`scryer -o report.csv` / `rails 'scryer:report[csv]'`) is a flat one-row-per-finding table
 (security + performance findings, plus dependency findings unless `--no-deps`/`nodeps` was used) —
-handy for dropping into a spreadsheet or importing into a ticketing tool. It skips duplicate-code
-groups, which don't reduce to a single actionable row.
+handy for dropping into a spreadsheet or importing into a ticketing tool; it skips duplicate-code
+groups, which don't reduce to a single actionable row. `.sarif` (`scryer -o report.sarif` /
+`rails 'scryer:report[sarif]'`) is for feeding into a CI security dashboard instead — see
+[CI/CD integration](#cicd-integration).
+
+## CI/CD integration
+
+`scryer -o report.sarif` writes a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/)
+report — the format GitHub Code Scanning, Azure DevOps, and most CI security dashboards ingest
+natively, turning findings into inline pull-request annotations and Security-tab entries instead
+of a report file nobody opens. It's a pure mapping of the same data every other format has —
+security, performance, and style findings (each mapped from `Scryer::Rule.rule_id`/`severity`) plus
+dependency findings (mapped from `kind`, located at `Gemfile.lock`) — so nothing behaves any
+differently than it does in HTML/JSON/CSV.
+
+Upload it with GitHub's own action in a workflow:
+
+```yaml
+# .github/workflows/scryer.yml
+name: Scryer
+on: [push, pull_request]
+
+jobs:
+  scryer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required to upload SARIF
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - run: gem install scryer
+      - run: scryer -o scryer.sarif
+        continue-on-error: true   # let the upload step run even on a non-zero exit; see below
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scryer.sarif
+```
+
+`continue-on-error: true` on the scan step matters: `scryer` exits non-zero when it finds anything
+(see [Running a scan](#running-a-scan)), which would otherwise skip the upload step entirely on
+the run where you most want to see the results. If you want the job to still fail the build overall
+on findings, check `scryer`'s own exit code in a separate step, or drop `continue-on-error` and
+accept that the SARIF upload only happens on clean runs.
 
 ## What gets scanned
 
@@ -413,11 +505,12 @@ runs automatically as part of every `scryer`/`scryer:report` scan — pass `--no
 `bundle-audit check` is a separate, standalone command from your test suite. Either way it exits
 non-zero if anything is found, so it can gate CI.
 
-Two checks run, and either can be called on its own as a library:
+Three checks run, and any of them can be called on its own as a library:
 
 ```ruby
 Scryer::DependencyAudit.insecure_sources(Rails.root.to_s)  # offline — no network needed
 Scryer::DependencyAudit.vulnerable_gems(Rails.root.to_s)   # needs network (OSV.dev)
+Scryer::DependencyAudit.ruby_eol_check(Rails.root.to_s)    # offline — checked against a small embedded table
 ```
 
 - **Insecure sources**: flags any `GIT`/`PATH` block in `Gemfile.lock` whose `remote:` is
@@ -428,10 +521,20 @@ Scryer::DependencyAudit.vulnerable_gems(Rails.root.to_s)   # needs network (OSV.
   name, so checking them against RubyGems advisories could misattribute or miss vulnerabilities),
   queries OSV.dev for known vulnerabilities affecting that exact version. Each finding carries the
   advisory id, title, a severity bucketed from OSV's own severity level, a link to the advisory,
-  and the fixed version(s) to upgrade to.
+  and the fixed version(s) to upgrade to. This is also where Rails-framework CVEs surface —
+  `rails`/`actionview`/`activestorage`/etc. are just gems in `Gemfile.lock` like any other.
+- **Ruby EOL**: checks the Ruby version pinned in `Gemfile.lock`'s `RUBY VERSION` section against
+  Ruby's own [published end-of-life dates](https://www.ruby-lang.org/en/downloads/branches/) — once
+  a series is EOL, no security patches are published for it at all, for any issue, regardless of
+  how up to date every gem is. Unlike the two checks above, this doesn't call OSV.dev: EOL dates
+  are announced years in advance and essentially never change, so a small embedded table
+  (`DependencyAudit::RUBY_EOL_DATES`) is a one-time/occasional-update cost rather than a live feed
+  — deliberately not a general Ruby-interpreter CVE database, which would mean maintaining exactly
+  the kind of stale bundled knowledge base this gem avoids elsewhere (OSV.dev has no queryable
+  Ruby-interpreter ecosystem to query live instead).
 
 **From the `scryer` executable** (outside a Rails app, or in CI): `scryer --audit-deps` runs the
-same two checks standalone (no static scan), same output/exit-code behavior as the rake task above.
+same three checks standalone (no static scan), same output/exit-code behavior as the rake task above.
 Plain `scryer` already folds them into the normal `-o` report — one HTML/JSON/CSV file covering
 static findings *and* dependency findings together — so `--audit-deps` is only for when you want
 dependency findings *without* the static scan. And for a single gem, without touching

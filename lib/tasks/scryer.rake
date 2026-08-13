@@ -8,7 +8,7 @@ require "fileutils"
 # ActiveSupport methods (`.presence`/`.blank?`) for the same reason — plain
 # Ruby nil-or-empty checks only.
 namespace :scryer do
-  desc "Run Scryer and write a report. Args are any mix of json/html/csv (which formats " \
+  desc "Run Scryer and write a report. Args are any mix of json/html/csv/sarif (which formats " \
        "to write — default json,html), the token 'nodeps' (skip the dependency audit — OSV.dev " \
        "vulnerable gems + insecure git/http sources — that otherwise runs by default; use for a " \
        "fast, fully offline run), plus at most one path (a directory when writing more than one " \
@@ -16,7 +16,7 @@ namespace :scryer do
        "so pass each token as its own item rather than one comma-joined string. " \
        "e.g. rails scryer:report, rails 'scryer:report[html]', " \
        "rails 'scryer:report[json,doc/security.json]', rails 'scryer:report[json,html]', " \
-       "rails 'scryer:report[html,nodeps]', rails 'scryer:report[csv]'"
+       "rails 'scryer:report[html,nodeps]', rails 'scryer:report[csv]', rails 'scryer:report[sarif]'"
   task :report, [:format] do |_, args|
     root = defined?(Rails) ? Rails.root.to_s : Dir.pwd
     dirs = Scryer.configuration.dirs
@@ -38,7 +38,8 @@ namespace :scryer do
     dependency_findings = []
     if run_deps
       puts "Scryer: querying OSV.dev for known-vulnerable gems (needs network)..."
-      dependency_findings = Scryer::DependencyAudit.insecure_sources(root) + Scryer::DependencyAudit.vulnerable_gems(root)
+      dependency_findings = Scryer::DependencyAudit.insecure_sources(root) + Scryer::DependencyAudit.vulnerable_gems(root) +
+                             Scryer::DependencyAudit.ruby_eol_check(root) + Scryer::DependencyAudit.credentials_exposure_check(root)
     end
 
     if Scryer.configuration.ai_client
@@ -63,12 +64,13 @@ namespace :scryer do
       content = case format
                 when "json" then renderer.as_json
                 when "csv" then renderer.as_csv
+                when "sarif" then renderer.as_sarif
                 else renderer.as_html
                 end
       File.write(path, content)
     end
 
-    ScryerTasks.print_summary(result: result, dependency_findings: dependency_findings, ran_deps: run_deps, paths: paths)
+    ScryerTasks.print_summary(result: result, dependency_findings: dependency_findings, ran_deps: run_deps, paths: paths, renderer: renderer)
 
     # Same gate as the `scryer` executable and scryer:audit_dependencies
     # below: fail the task (and so the CI job running it) on any security or
@@ -92,20 +94,23 @@ namespace :scryer do
 
     puts "Scryer: querying OSV.dev for known vulnerabilities (needs network)..."
     vulnerable = Scryer::DependencyAudit.vulnerable_gems(root)
+    ruby_eol = Scryer::DependencyAudit.ruby_eol_check(root)
+    credentials_exposure = Scryer::DependencyAudit.credentials_exposure_check(root)
 
-    (insecure + vulnerable).each do |f|
-      label = f.kind == "insecure_source" ? "[#{f.severity.upcase}] #{f.message}" : "[#{f.severity.upcase}] #{f.gem_name} #{f.installed_version} - #{f.advisory_id}: #{f.title}"
-      puts label
+    (insecure + vulnerable + ruby_eol + credentials_exposure).each do |f|
+      puts "[#{f.severity.upcase}] #{ScryerTasks.dependency_label(f)}"
       puts "  fix: #{f.suggested_fix}"
     end
 
-    total = insecure.size + vulnerable.size
-    puts "\nScryer: #{total} dependency finding(s) (#{insecure.size} insecure source, #{vulnerable.size} vulnerable gem)."
+    total = insecure.size + vulnerable.size + ruby_eol.size + credentials_exposure.size
+    puts "\nScryer: #{total} dependency finding(s) (#{insecure.size} insecure source, " \
+         "#{vulnerable.size} vulnerable gem, #{ruby_eol.size} Ruby EOL, " \
+         "#{credentials_exposure.size} credentials exposure)."
     abort("Scryer: dependency audit failed.") if total.positive?
   end
 
-  VALID_FORMATS = %w[json html csv].freeze
-  EXTENSION_FOR_FORMAT = { "json" => "json", "html" => "html", "csv" => "csv" }.freeze
+  VALID_FORMATS = %w[json html csv sarif].freeze
+  EXTENSION_FOR_FORMAT = { "json" => "json", "html" => "html", "csv" => "csv", "sarif" => "sarif" }.freeze
   NO_DEPS_TOKEN = "nodeps".freeze
 
   # tokens is every bracket arg Rake was given, e.g. %w[json doc/security.json] or
@@ -178,11 +183,18 @@ module ScryerTasks
     nil
   end
 
+  def dependency_label(f)
+    return f.message if f.kind == "insecure_source"
+    return "#{f.gem_name} #{f.installed_version} - #{f.advisory_id}: #{f.title}" if f.advisory_id
+
+    "#{f.gem_name} #{f.installed_version}: #{f.title}"
+  end
+
   # The "one audit command" summary — a single scan's worth of every
   # category Scryer covers (security, performance, duplicate/smelly code,
   # dependencies), the same categories usually split across RuboCop +
   # Brakeman + bundler-audit + Reek, side by side in one box.
-  def print_summary(result:, dependency_findings:, ran_deps:, paths:)
+  def print_summary(result:, dependency_findings:, ran_deps:, paths:, renderer:)
     # "Code Quality" is the umbrella label for both duplicate-code groups
     # and rule-based style findings (e.g. frozen_string_literal) — two
     # different detectors, same broad concern, one row in the box.
@@ -206,11 +218,26 @@ module ScryerTasks
     puts divider
     puts summary_row("Total", total)
     puts ""
+    print_top_priorities(renderer.top_risks)
     paths.each { |format, path| puts "#{format.upcase} report: #{path}" }
   end
 
   def summary_row(label, count)
     value = count.nil? ? "skipped (nodeps)" : "#{count} finding#{"s" unless count == 1}"
     "#{label.ljust(14)}#{value.rjust(20)}"
+  end
+
+  # The categories above are counted separately, but nothing else ranks
+  # across them — this is what actually backs "tells you what to fix
+  # first" rather than just splitting findings into four buckets. Same
+  # data ReportRenderer#top_risks already sorts for the HTML report.
+  def print_top_priorities(risks)
+    return if risks.empty?
+
+    puts "Top priorities:"
+    risks.each_with_index do |r, i|
+      puts "  #{i + 1}. [#{r[:severity]}] #{r[:category]} — #{r[:label]} (#{r[:location]})"
+    end
+    puts ""
   end
 end

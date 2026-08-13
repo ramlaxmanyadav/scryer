@@ -24,7 +24,25 @@ module Scryer
       # avoids double-counting the inner call node these wrap.
       ARG_METHODS = %w[update update! update_attribute update_attributes].freeze
 
+      # `db/seeds.rb` (and the multi-file `db/seeds/*.rb` convention Rails
+      # supports via `Rails.application.load_seed`) is a one-time, manually
+      # run setup script, not a request-handling hot path — the whole
+      # premise of this rule (per-record round-trips scale badly as load
+      # grows) doesn't apply to a script a developer runs once at setup
+      # time for a small, fixed reference dataset (roles, plans, countries,
+      # ...). Flagging `roles.each { |r| r.save! }` there is just noise, so
+      # this rule skips findings whose file is exactly this path or under
+      # this directory. Deliberately file-path-based rather than trying to
+      # infer "small dataset" from the AST (which isn't reliably knowable —
+      # a seed file can still iterate a CSV of arbitrary size), and narrow
+      # to this one well-known Rails convention rather than any file that
+      # merely "looks like a script" elsewhere in the app.
+      SEED_FILE = "db/seeds.rb"
+      SEED_DIR_PREFIX = "db/seeds/"
+
       def scan
+        return [] if seed_file?
+
         findings = []
 
         Ast.each_node(sexp) do |node|
@@ -57,6 +75,19 @@ module Scryer
       end
 
       private
+
+      # `Scanner` builds `file` by globbing `File.join(root, dir, "**", "*.rb")`
+      # with `dir` defaulting to `"."`, so the relative path it hands rules is
+      # actually `"./db/seeds.rb"`, not `"db/seeds.rb"` — a plain `==`/
+      # `start_with?` against the un-prefixed string silently never matches
+      # against a real scan (verified: without stripping the prefix here,
+      # `db/seeds.rb` still fired in a real `Scryer::Scanner.new(root:,
+      # dirs: ["."]).call` run). Strip a leading `./` before comparing so
+      # this matches how the path actually arrives, not an assumed form.
+      def seed_file?
+        normalized = file.to_s.delete_prefix("./")
+        normalized == SEED_FILE || normalized.start_with?(SEED_DIR_PREFIX)
+      end
 
       def block_param_name(block_node)
         return nil unless Ast.tagged?(block_node, :do_block, :brace_block)

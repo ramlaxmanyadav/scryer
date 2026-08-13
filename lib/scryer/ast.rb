@@ -64,14 +64,17 @@ module Scryer
     # Returns the receiver node (nil for a bare/vcall) and the method name
     # string if `node` is a call to one of `method_names`, else nil.
     #
-    # Handles the two shapes Ripper produces for a called method:
-    #   [:call, receiver, [:@period,...]|:"::", [:@ident, "name", pos]]  (has a receiver)
-    #   [:vcall, [:@ident, "name", pos]]                                 (bare, no args)
-    #   [:command, [:@ident, "name", pos], args]                         (bare, with args, no parens)
-    #   [:method_add_arg, call_or_fcall_node, args_node]                 (receiver/bare + parens)
+    # Handles the shapes Ripper produces for a called method:
+    #   [:call, receiver, [:@period,...]|:"::", [:@ident, "name", pos]]        (has a receiver, parens or no args)
+    #   [:vcall, [:@ident, "name", pos]]                                       (bare, no args)
+    #   [:fcall, [:@ident, "name", pos]]                                       (bare + parens, no receiver)
+    #   [:command, [:@ident, "name", pos], args]                               (bare, with args, no parens)
+    #   [:command_call, receiver, [:@period,...], [:@ident, "name", pos], args] (receiver + args, no parens —
+    #                                                                            e.g. `config.session_store :x, y: z`)
+    #   [:method_add_arg, call_or_fcall_node, args_node]                       (receiver/bare + parens, wraps one of the above)
     def call_name(node)
       case node
-      when ->(n) { tagged?(n, :call) }
+      when ->(n) { tagged?(n, :call, :command_call) }
         [node[1], ident_text(node[3])]
       when ->(n) { tagged?(n, :vcall) }
         [nil, ident_text(node[1])]
@@ -245,6 +248,66 @@ module Scryer
         cursor += 1
       end
       result
+    end
+
+    # Given a list of top-level argument nodes (from call_arguments), finds
+    # the bare_assoc_hash entry whose label matches `label:` and returns its
+    # value node, or nil if that keyword argument isn't present. Covers
+    # Rails DSL calls like `session_store :cookie_store, secure: true` or
+    # `http_basic_authenticate_with password: "x"`, where keyword args
+    # arrive as a bare_assoc_hash rather than a real Hash literal.
+    def keyword_arg(args, label)
+      target = "#{label}:"
+
+      args.each do |arg|
+        next unless tagged?(arg, :bare_assoc_hash) && arg[1].is_a?(Array)
+
+        pair = arg[1].find { |p| tagged?(p, :assoc_new) && p[1].is_a?(Array) && p[1][0] == :@label && p[1][1] == target }
+        return pair[2] if pair
+      end
+
+      nil
+    end
+
+    # The literal text of a symbol_literal (`:inline`) or plain string_literal
+    # (`"inline"`) node — the two shapes a Rails DSL keyword argument's value
+    # commonly takes. nil for anything else (interpolated string, array,
+    # boolean, ...).
+    def literal_text(node)
+      return plain_string_value(node) if tagged?(node, :string_literal)
+      return nil unless tagged?(node, :symbol_literal) && node[1].is_a?(Array)
+
+      ident_text(node[1][1]) if tagged?(node[1], :symbol)
+    end
+
+    # True if `node` is the literal `true`/`false` keyword
+    # (`[:var_ref, [:@kw, "true"|"false", pos]]`).
+    def true_literal?(node)
+      kw_literal?(node) == "true"
+    end
+
+    def false_literal?(node)
+      kw_literal?(node) == "false"
+    end
+
+    def kw_literal?(node)
+      return nil unless tagged?(node, :var_ref) && node[1].is_a?(Array) && node[1][0] == :@kw
+
+      node[1][1]
+    end
+
+    # True if `node` is `params`, `params[:x]`, or contains such a reference
+    # anywhere in its subtree — the shared "does this touch raw request data"
+    # check behind mass assignment, IDOR, SSRF, and path traversal detection.
+    # Says nothing about whether that reference is guarded (`.permit`,
+    # sanitization, an allowlist, ...) — callers that care about a specific
+    # guard (like MassAssignmentRule's `.permit`) check for it separately.
+    def references_params?(node)
+      return false unless node.is_a?(Array)
+
+      each_node(node).any? do |n|
+        tagged?(n, :vcall, :var_ref, :fcall) && ident_text(n[1]) == "params"
+      end
     end
 
     # Walks every terminal token-bearing node inside `node` and maps it to a

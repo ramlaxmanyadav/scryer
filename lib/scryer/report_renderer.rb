@@ -14,6 +14,13 @@ module Scryer
     SEVERITY_LABELS = { "critical" => "Critical", "warning" => "Warning", "info" => "Info" }.freeze
     CSV_HEADERS = %w[kind identifier severity location message suggested_fix code_snippet url].freeze
 
+    # Tiebreak within the same severity for top_risks — a critical finding
+    # is a critical finding regardless of category, but when severity is
+    # equal this is the order that best matches "what's actually riskiest":
+    # a security hole, then a known-vulnerable dependency, ahead of a
+    # performance or style issue at the same nominal severity.
+    CATEGORY_RISK_PRIORITY = { "security" => 0, "dependency" => 1, "performance" => 2, "code quality" => 3 }.freeze
+
     # `dependency_findings` is an optional array of Scryer::DependencyAudit::
     # Finding (insecure_sources + vulnerable_gems) — pass it to fold a
     # bundler-audit-like dependency audit into the same report as the static
@@ -54,6 +61,31 @@ module Scryer
       JSON.pretty_generate(as_hash)
     end
 
+    DEFAULT_TOP_RISKS_LIMIT = 5
+
+    # This is what actually backs "tells you what to fix first" — Scryer's
+    # categories (security, dependencies, performance, code quality) each
+    # already carry a severity ("critical"/"warning"/"info"), but they're
+    # scanned and reported separately; nothing ranks across them. top_risks
+    # merges every severity-bearing finding (rule-based + dependency) into
+    # one list, sorted by severity first and then by category (a security
+    # hole outranks a stylistic one at the same severity) — pure aggregation
+    # of data every format already has, no new detection logic. Used by the
+    # console summary (CLI + rake) and the top of the HTML report; JSON/CSV/
+    # SARIF are consumed by other tools that do their own sorting/filtering,
+    # so this stays a display-only convenience rather than a new field there.
+    def top_risks(limit: DEFAULT_TOP_RISKS_LIMIT)
+      h = as_hash
+      entries = []
+      h["security_findings"].each { |f| entries << finding_risk_entry("security", f) }
+      h["performance_findings"].each { |f| entries << finding_risk_entry("performance", f) }
+      h["style_findings"].each { |f| entries << finding_risk_entry("code quality", f) }
+      h["dependency_findings"].each { |f| entries << dependency_risk_entry(f) }
+
+      entries.sort_by { |e| [SEVERITY_ORDER.index(e[:severity]) || SEVERITY_ORDER.size, CATEGORY_RISK_PRIORITY[e[:category]] || 99] }
+             .first(limit)
+    end
+
     # Flat, one-row-per-finding CSV — security + performance findings plus
     # any dependency findings, in that order — for dropping into a
     # spreadsheet or importing into a ticketing tool. Deliberately excludes
@@ -71,6 +103,18 @@ module Scryer
       h["dependency_findings"].each { |f| rows << dependency_csv_row(f) }
 
       rows.map { |row| row.map { |field| csv_field(field) }.join(",") }.join("\n")
+    end
+
+    SARIF_LEVEL_BY_SEVERITY = { "critical" => "error", "warning" => "warning", "info" => "note" }.freeze
+
+    # SARIF 2.1.0 (docs.oasis-open.org/sarif/sarif/v2.1.0) — the format
+    # GitHub Code Scanning (and other CI security dashboards) natively
+    # ingest, turning findings into inline PR annotations and Security-tab
+    # entries instead of a report file nobody opens. Pure data mapping of
+    # what's already in as_hash — no new detection logic, and every finding
+    # behaves identically to how it does in the other formats.
+    def as_sarif
+      JSON.pretty_generate(sarif_hash)
     end
 
     def as_html
@@ -112,7 +156,7 @@ module Scryer
           </section>
 
           <section id="checks-performed">
-            <h2>Checks performed</h2>
+            <h2>Checks performed #{expand_collapse_controls("#checks-performed")}</h2>
             #{render_checks_performed}
           </section>
 
@@ -123,6 +167,12 @@ module Scryer
 
           <section id="findings">
             <h2>Findings (#{all_findings.size}) #{expand_collapse_controls("#findings")}</h2>
+
+            <div id="top-priorities">
+              <h3>Top priorities — fix these first</h3>
+              #{render_top_priorities(top_risks)}
+            </div>
+
             #{render_severity_section("critical", by_severity["critical"] || [])}
             #{render_severity_section("warning", by_severity["warning"] || [])}
             #{render_severity_section("info", by_severity["info"] || [])}
@@ -165,6 +215,7 @@ module Scryer
           <a href="#checks-performed">Checks performed</a>
           <a href="#warnings-by-type">Warnings by type</a>
           <a href="#findings">Findings</a>
+          <a href="#top-priorities">Top priorities</a>
           <a href="#duplicates">Duplicate code (#{h["duplicate_groups"].size})</a>
           <a href="#dependency-audit">Dependency audit (#{h["dependency_findings"].size})</a>
           <a href="#errors">Parse errors (#{h["parse_errors"].size})</a>
@@ -223,14 +274,31 @@ module Scryer
       Scryer::RuleSet.all.each_with_object({}) { |r, acc| acc[r.rule_id] = r.title }
     end
 
+    # Collapsed by default, same as render_rule_group — this is reference
+    # material (every rule that *can* fire, not what actually did), and with
+    # 26 security rules alone, showing all three category tables expanded by
+    # default buried the sections a reader actually came for (Findings,
+    # Top priorities) under a wall of rows nobody needed to see up front.
     def render_checks_performed
-      security_rules = rules_by_category["security"] || []
-      performance_rules = rules_by_category["performance"] || []
-      style_rules = rules_by_category["style"] || []
+      [
+        checks_accordion("checks-security", "Security", rules_by_category["security"] || []),
+        checks_accordion("checks-performance", "Performance", rules_by_category["performance"] || []),
+        checks_accordion("checks-style", "Style", rules_by_category["style"] || [])
+      ].join
+    end
 
-      "<h3>Security (#{security_rules.size})</h3>#{checks_table(security_rules)}" \
-      "<h3>Performance (#{performance_rules.size})</h3>#{checks_table(performance_rules)}" \
-      "<h3>Style (#{style_rules.size})</h3>#{checks_table(style_rules)}"
+    def checks_accordion(anchor, label, rules)
+      <<~HTML
+        <div class="accordion" id="#{anchor}">
+          <button type="button" class="accordion-header">
+            <span>#{escape(label)}</span>
+            <span class="accordion-meta">#{rules.size} rule#{"s" unless rules.size == 1}<span class="chevron">&#9656;</span></span>
+          </button>
+          <div class="accordion-body">
+            #{checks_table(rules)}
+          </div>
+        </div>
+      HTML
     end
 
     def checks_table(rules)
@@ -408,7 +476,8 @@ module Scryer
     def render_dependency_finding(f)
       severity = f["severity"]
       heading = f["kind"] == "insecure_source" ? "Insecure gem source" : "#{escape(f["gem_name"])} #{escape(f["installed_version"])}"
-      advisory = f["advisory_id"] ? "<span class=\"loc\">#{escape(f["advisory_id"])}#{f["title"] ? " — #{escape(f["title"])}" : ""}</span>" : ""
+      advisory_text = [f["advisory_id"], f["title"]].compact.map { |t| escape(t) }.join(" — ")
+      advisory = advisory_text.empty? ? "" : "<span class=\"loc\">#{advisory_text}</span>"
       link = f["url"] ? " &middot; <a href=\"#{escape(f["url"])}\" target=\"_blank\" rel=\"noopener\">advisory</a>" : ""
       patched = Array(f["patched_versions"])
 
@@ -424,6 +493,52 @@ module Scryer
           <div class="fix"><strong>Suggested fix:</strong>#{render_markdown(f["suggested_fix"])}</div>
         </div>
       ROW
+    end
+
+    def render_top_priorities(risks)
+      return "<p class=\"muted\">Nothing critical or above — the highest-priority findings, " \
+             "if any, are in the sections below.</p>" if risks.empty?
+
+      items = risks.map do |r|
+        <<~ITEM
+          <li class="finding #{r[:severity]}">
+            <div class="finding-head">
+              <span class="badge #{r[:severity]}">#{r[:severity].upcase}</span>
+              <span class="loc">#{escape(r[:category])} &middot; <code>#{escape(r[:label].to_s)}</code> &middot; #{escape(r[:location].to_s)}</span>
+            </div>
+            <p>#{escape(r[:message])}</p>
+          </li>
+        ITEM
+      end.join
+
+      "<ol class=\"top-risks\">#{items}</ol>"
+    end
+
+    def finding_risk_entry(category, f)
+      {
+        severity: f["severity"],
+        category: category,
+        label: f["rule_id"],
+        location: f["line"] ? "#{f["file"]}:#{f["line"]}" : f["file"],
+        message: f["message"]
+      }
+    end
+
+    def dependency_risk_entry(f)
+      location =
+        if f["gem_name"]
+          f["installed_version"] ? "#{f["gem_name"]} #{f["installed_version"]}" : f["gem_name"]
+        else
+          "Gemfile.lock"
+        end
+
+      {
+        severity: f["severity"],
+        category: "dependency",
+        label: f["kind"],
+        location: location,
+        message: f["message"]
+      }
     end
 
     def escape(text)
@@ -481,13 +596,100 @@ module Scryer
     end
 
     def dependency_csv_row(f)
-      identifier = f["kind"] == "insecure_source" ? "insecure_source" : "#{f["gem_name"]} #{f["installed_version"]} (#{f["advisory_id"]})"
+      identifier =
+        if f["kind"] == "insecure_source"
+          "insecure_source"
+        elsif f["advisory_id"]
+          "#{f["gem_name"]} #{f["installed_version"]} (#{f["advisory_id"]})"
+        else
+          "#{f["gem_name"]} #{f["installed_version"]}"
+        end
       [f["kind"], identifier, f["severity"], "Gemfile.lock", f["message"], f["suggested_fix"], nil, f["url"]]
     end
 
     def csv_field(value)
       s = value.to_s
       s.match?(/[",\n\r]/) ? "\"#{s.gsub('"', '""')}\"" : s
+    end
+
+    # kind/title/severity for the three DependencyAudit finding kinds, which
+    # (unlike security/performance/style findings) aren't backed by a
+    # Scryer::Rule — described here just so SARIF's tool.driver.rules[]
+    # taxonomy has an entry for them too.
+    DEPENDENCY_SARIF_RULES = [
+      { "id" => "vulnerable_dependency", "title" => "Known-vulnerable gem version (OSV.dev)", "severity" => "critical" },
+      { "id" => "insecure_source", "title" => "Insecure (unencrypted) Gemfile.lock source", "severity" => "warning" },
+      { "id" => "ruby_eol", "title" => "Ruby version is end-of-life", "severity" => "critical" },
+      { "id" => "credentials_exposure", "title" => "config/master.key present and not gitignored", "severity" => "critical" }
+    ].freeze
+
+    def sarif_hash
+      h = as_hash
+      findings = h["security_findings"] + h["performance_findings"] + h["style_findings"]
+
+      {
+        "$schema" => "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version" => "2.1.0",
+        "runs" => [
+          {
+            "tool" => {
+              "driver" => {
+                "name" => "Scryer",
+                "version" => Scryer::VERSION,
+                "informationUri" => "https://ramlaxmanyadav.github.io/scryer/",
+                "rules" => sarif_rules
+              }
+            },
+            "results" => findings.map { |f| sarif_result(f) } + h["dependency_findings"].map { |f| sarif_dependency_result(f) }
+          }
+        ]
+      }
+    end
+
+    def sarif_rules
+      rule_entries = Scryer::RuleSet.all.map do |rule|
+        {
+          "id" => rule.rule_id,
+          "name" => rule.rule_id,
+          "shortDescription" => { "text" => rule.title },
+          "defaultConfiguration" => { "level" => SARIF_LEVEL_BY_SEVERITY[rule.default_severity] || "warning" }
+        }
+      end
+
+      dependency_entries = DEPENDENCY_SARIF_RULES.map do |r|
+        {
+          "id" => r["id"],
+          "name" => r["id"],
+          "shortDescription" => { "text" => r["title"] },
+          "defaultConfiguration" => { "level" => SARIF_LEVEL_BY_SEVERITY[r["severity"]] || "warning" }
+        }
+      end
+
+      rule_entries + dependency_entries
+    end
+
+    def sarif_result(f)
+      physical_location = { "artifactLocation" => { "uri" => f["file"] } }
+      physical_location["region"] = { "startLine" => f["line"] } if f["line"]
+
+      {
+        "ruleId" => f["rule_id"],
+        "level" => SARIF_LEVEL_BY_SEVERITY[f["severity"]] || "warning",
+        "message" => { "text" => f["message"] },
+        "locations" => [{ "physicalLocation" => physical_location }]
+      }
+    end
+
+    # Dependency findings don't point at a line in app source — Gemfile.lock
+    # itself is the meaningful "location" (no region: nothing to underline
+    # inside it the way a code finding underlines a specific line).
+    def sarif_dependency_result(f)
+      {
+        "ruleId" => f["kind"],
+        "level" => SARIF_LEVEL_BY_SEVERITY[f["severity"]] || "warning",
+        "message" => { "text" => f["message"] },
+        "locations" => [{ "physicalLocation" => { "artifactLocation" => { "uri" => "Gemfile.lock" } } }]
+      }
     end
 
     CSS = <<~CSS
@@ -507,6 +709,8 @@ module Scryer
       table.kv th { width: 12rem; background: #f8fafc; color: #475569; font-weight: 600; }
       table.summary th, table.checks th { background: #f8fafc; color: #475569; }
       table.summary tr.total { font-weight: 700; }
+      #top-priorities { margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 2px solid #e2e8f0; }
+      .top-risks { list-style: none; padding: 0; margin: 0; }
       .finding { border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.75rem; }
       .finding-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
       .badge { font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 4px; }

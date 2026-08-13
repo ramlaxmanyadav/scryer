@@ -13,7 +13,16 @@ module Scryer
       self.title = "Weak hash algorithm used for password/credential hashing"
 
       WEAK_DIGESTS = %w[MD5 SHA1].freeze
-      PASSWORD_HINT = /password|passwd|credential/i.freeze
+
+      # `(?!less)` after "password" excludes "passwordless" (and
+      # "passwordlessly") specifically — a real identifier that means the
+      # *opposite* of what this heuristic is looking for (e.g. a magic-link
+      # or passwordless-auth token, `Digest::SHA1.hexdigest(passwordless_token)`),
+      # not a credential. It doesn't affect any legitimate match: every other
+      # "password"-containing identifier this heuristic cares about
+      # (`password`, `user_password`, `password_reset_token`, `hashed_password`,
+      # ...) is never immediately followed by the literal substring "less".
+      PASSWORD_HINT = /password(?!less)|passwd|credential/i.freeze
 
       def scan
         findings = []
@@ -29,7 +38,7 @@ module Scryer
           # non-credential uses (cache keys, ETags, checksums) that shouldn't
           # be flagged as a crypto weakness.
           line = Ast.line_of(node)
-          context_line = Ast.source_line(source, line).to_s
+          context_line = strip_trailing_comment(Ast.source_line(source, line).to_s)
           next unless PASSWORD_HINT.match?(context_line)
 
           findings << finding(
@@ -48,6 +57,29 @@ module Scryer
       end
 
       private
+
+      # Strips a trailing `# ...` line comment before running PASSWORD_HINT
+      # against the raw source line. Without this, a defensive comment that
+      # *disclaims* password use (`Digest::SHA1.hexdigest(file_content) #
+      # cache key, not a password hash` — a natural thing to write specifically
+      # to preempt this exact kind of static-analysis false positive) still
+      # contains the substring "password" and would trip the heuristic just
+      # as hard as a genuine mention. This does give up the (much rarer) case
+      # where a comment is the *only* signal — e.g. an unnamed argument whose
+      # only password-ish hint is a comment describing it — but real
+      # password-hashing call sites almost always also have a password-ish
+      # identifier in the actual code (`password`, `user.password`, ...),
+      # which stays visible on the line after stripping the comment.
+      #
+      # Deliberately simple rather than a full tokenizer: finds the first `#`
+      # that isn't the start of a `#{` string interpolation and treats
+      # everything from there as comment. This means a literal `#` inside a
+      # string argument on the same line (e.g. `hexdigest("score: #1")`) would
+      # be mistaken for a comment start too — an accepted limitation of a
+      # same-line text heuristic, not a full parse.
+      def strip_trailing_comment(line)
+        line.sub(/#(?!\{).*\z/, "")
+      end
 
       # Matches `Digest::MD5` / `Digest::SHA1` referenced as a constant path.
       def digest_algorithm_name(node)

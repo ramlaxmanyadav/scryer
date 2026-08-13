@@ -1,4 +1,5 @@
 require "json"
+require "date"
 
 module Scryer
   # Dependency vulnerability + supply-chain-hygiene checks for Gemfile.lock —
@@ -55,15 +56,35 @@ module Scryer
       "LOW" => "info"
     }.freeze
 
+    # Ruby's own published maintenance-branch EOL dates
+    # (ruby-lang.org/en/downloads/branches/) — these are announced years in
+    # advance and essentially never move, unlike a CVE feed, so this is a
+    # one-time/occasional-update cost rather than an ongoing sync burden.
+    # Update when a new branch's EOL is announced, or an older branch not
+    # listed here needs adding.
+    RUBY_EOL_DATES = {
+      "2.5" => Date.new(2021, 3, 31),
+      "2.6" => Date.new(2022, 3, 31),
+      "2.7" => Date.new(2023, 3, 31),
+      "3.0" => Date.new(2024, 3, 31),
+      "3.1" => Date.new(2025, 3, 31),
+      "3.2" => Date.new(2026, 3, 31),
+      "3.3" => Date.new(2027, 3, 31),
+      "3.4" => Date.new(2028, 3, 31)
+    }.freeze
+
     class << self
-      # Parses a Gemfile.lock into `{ gems: { name => {version:, source:} }, git_or_path_sources: [...] }`.
-      # `source` is "gem", "git", or "path" — taken from which top-level
-      # block (GEM/GIT/PATH) the spec's `specs:` list appeared under.
+      # Parses a Gemfile.lock into `{ gems: { name => {version:, source:} },
+      # git_or_path_sources: [...], ruby_version: "3.3.3" | nil }`. `source`
+      # is "gem", "git", or "path" — taken from which top-level block
+      # (GEM/GIT/PATH) the spec's `specs:` list appeared under.
       def parse_lockfile(path)
         gems = {}
         git_or_path_sources = []
+        ruby_version = nil
 
-        current_block = nil # "gem" | "git" | "path" | other section name
+        current_block = nil # "gem" | "git" | "path" | nil (other section)
+        current_section = nil # PLATFORMS | DEPENDENCIES | BUNDLED WITH | RUBY VERSION | nil
         current_remote = nil
         in_specs = false
 
@@ -71,10 +92,12 @@ module Scryer
           case line
           when /\A(GEM|GIT|PATH)\s*\z/
             current_block = Regexp.last_match(1).downcase
+            current_section = nil
             current_remote = nil
             in_specs = false
           when /\A(PLATFORMS|DEPENDENCIES|BUNDLED WITH|RUBY VERSION)\s*\z/
             current_block = nil
+            current_section = Regexp.last_match(1)
             in_specs = false
           when /\A {2}remote:\s*(\S+)\s*\z/
             current_remote = Regexp.last_match(1)
@@ -90,10 +113,46 @@ module Scryer
             # in pathological Gemfiles; last one wins, consistent with how
             # Bundler itself resolves a single spec per gem name.
             gems[name] = { version: version, source: current_block }
+          when /\A\s*ruby\s+(\S+)\s*\z/
+            ruby_version = Regexp.last_match(1) if current_section == "RUBY VERSION"
           end
         end
 
-        { gems: gems, git_or_path_sources: git_or_path_sources }
+        { gems: gems, git_or_path_sources: git_or_path_sources, ruby_version: ruby_version }
+      end
+
+      # Offline. Flags the Ruby version pinned in Gemfile.lock's RUBY
+      # VERSION section if its minor series is past end-of-life — after that
+      # date Ruby publishes no more security patches for it, for any issue,
+      # so this is a real gap even with every gem otherwise up to date.
+      # Returns [] if no version is pinned, or its series isn't one
+      # RUBY_EOL_DATES knows about (never guessed as "fine" by omission).
+      def ruby_eol_check(root)
+        lockfile = File.join(root, "Gemfile.lock")
+        return [] unless File.exist?(lockfile)
+
+        ruby_version = parse_lockfile(lockfile)[:ruby_version]
+        return [] unless ruby_version
+
+        series = ruby_version[/\A\d+\.\d+/]
+        eol_date = series && RUBY_EOL_DATES[series]
+        return [] unless eol_date && Date.today > eol_date
+
+        [
+          Finding.new(
+            kind: "ruby_eol",
+            gem_name: "Ruby",
+            installed_version: ruby_version,
+            severity: "critical",
+            title: "Ruby #{series} is end-of-life",
+            url: "https://www.ruby-lang.org/en/downloads/branches/",
+            patched_versions: [],
+            message: "Ruby #{ruby_version} (#{series} series) reached end-of-life on " \
+                      "#{eol_date} — no security patches are published for it anymore, for any issue.",
+            suggested_fix: "Upgrade to a Ruby version still receiving security maintenance — see " \
+                            "https://www.ruby-lang.org/en/downloads/branches/ for current status."
+          )
+        ]
       end
 
       # Offline. Flags GIT/PATH sources recorded with an unencrypted remote
@@ -160,6 +219,41 @@ module Scryer
         findings
       end
 
+      # Offline. Flags `config/master.key` (the key that decrypts Rails
+      # encrypted credentials, config/credentials.yml.enc) if it exists on
+      # disk and .gitignore doesn't exclude it — Rails generates it
+      # gitignored by default (`/config/master.key`), but that line is easy
+      # to lose (a merge, a from-scratch .gitignore, copying the file into a
+      # repo that never had the Rails default). If this file is ever
+      # committed, anyone with repo access — including git history, even
+      # after a later removal — can decrypt every credential in
+      # config/credentials.yml.enc.
+      def credentials_exposure_check(root)
+        master_key_path = File.join(root, "config", "master.key")
+        return [] unless File.exist?(master_key_path)
+        return [] if master_key_gitignored?(root)
+
+        [
+          Finding.new(
+            kind: "credentials_exposure",
+            gem_name: "Rails",
+            severity: "critical",
+            title: "config/master.key is present and not gitignored",
+            url: "https://guides.rubyonrails.org/security.html",
+            patched_versions: [],
+            message: "config/master.key exists in this app, but .gitignore doesn't exclude it " \
+                      "(checked for both `/config/master.key` and `config/master.key`) — if this " \
+                      "file is ever committed, anyone with repository access, including git " \
+                      "history even after a later removal, can decrypt every credential in " \
+                      "config/credentials.yml.enc.",
+            suggested_fix: "Add `/config/master.key` to .gitignore immediately. If this key was " \
+                            "ever actually committed to git history, treat every credential in " \
+                            "config/credentials.yml.enc as compromised: rotate them and regenerate " \
+                            "the master key (delete both files, then `bin/rails credentials:edit`)."
+          )
+        ]
+      end
+
       # Needs network. One-off OSV.dev lookup for a single gem, independent
       # of any Gemfile.lock — backs `scryer --check-gem NAME[:VERSION]`.
       # With a version, only vulnerabilities affecting that exact version
@@ -170,6 +264,15 @@ module Scryer
       end
 
       private
+
+      def master_key_gitignored?(root)
+        gitignore_path = File.join(root, ".gitignore")
+        return false unless File.exist?(gitignore_path)
+
+        File.foreach(gitignore_path).any? do |line|
+          line.strip.match?(%r{\A/?config/master\.key\z})
+        end
+      end
 
       def query_osv(name, version = nil)
         require "net/http"

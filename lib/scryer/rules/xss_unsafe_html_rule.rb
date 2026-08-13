@@ -11,6 +11,30 @@ module Scryer
       self.default_severity = "warning"
       self.title = "Unescaped HTML output (possible XSS)"
 
+      # Rails helpers whose whole job is to hand back HTML that's already
+      # safe to render unescaped, so a `.html_safe` immediately wrapped
+      # around a call to one of these isn't the same risk as calling it on
+      # raw user input:
+      #   - `sanitize(x)` strips to an explicit allow-list of tags/attrs —
+      #     it's the standard sanitize-then-mark-safe idiom this rule exists
+      #     to steer people *toward*, so flagging it would contradict our
+      #     own suggested fix.
+      #   - `strip_tags(x)` removes all markup, so there's no HTML left to
+      #     inject.
+      #   - `simple_format(x)` runs the text through `sanitize` internally by
+      #     default (it only skips that when called with an explicit
+      #     `sanitize: false` option, which we don't special-case here).
+      #   - `t(...)`/`translate(...)` pulls from the app's own locale files,
+      #     not attacker-controlled request data — translators, not users,
+      #     write that content, so this is Rails' own common "trusted copy"
+      #     idiom rather than a raw-input passthrough.
+      # This says nothing about the *argument* passed to these methods being
+      # safe on its own — it's specifically the combination of "wrapped in
+      # one of these calls, then marked html_safe" that's the recognized
+      # pattern. A bare `params[:bio].html_safe` or an interpolated string
+      # marked safe still flags, since neither goes through any of these.
+      SANITIZING_METHODS = %w[sanitize strip_tags simple_format t translate].freeze
+
       def scan
         findings = []
 
@@ -62,8 +86,22 @@ module Scryer
       def safe_literal?(node)
         return true if node.nil?
         return true if Ast.tagged?(node, :string_literal) && !Ast.string_literal_has_interpolation?(node)
+        return true if sanitizing_call?(node)
 
         false
+      end
+
+      # True if `node` is a call (parenthesized or bare) to one of
+      # SANITIZING_METHODS — see that constant's comment for why those
+      # specific methods are exempt.
+      def sanitizing_call?(node)
+        inner = Ast.tagged?(node, :method_add_arg) ? node[1] : node
+        return false unless Ast.tagged?(inner, :call, :command_call, :vcall, :fcall, :command)
+
+        name_pair = Ast.call_name(inner)
+        return false unless name_pair
+
+        SANITIZING_METHODS.include?(name_pair[1])
       end
     end
   end
