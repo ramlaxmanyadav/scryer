@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-14
+
+- Docs-only, generic file/controller names — the finding counts, severities, rule IDs, and line numbers in
+  every example are unchanged (still real, still exactly as scanned), only the identifying labels
+  are redacted. 1.1.0 is yanked from RubyGems for this reason; no code changed between 1.1.0 and
+  1.1.1.
+
 ## [1.1.0] - 2026-08-14
 
 - `Scryer::AuthorizationWatcher` (`require "scryer/authorization_watcher"`, opt-in): a runtime
