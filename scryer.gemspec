@@ -52,4 +52,11 @@ Gem::Specification.new do |spec|
   # those are conditionally loaded only inside a Rails app (see lib/scryer.rb).
 
   spec.add_development_dependency "rake", "~> 13.0"
+  # minitest ships with Ruby (a "default gem"), but Bundler won't expose a
+  # default gem to `bundle exec` unless it's an explicit dependency here —
+  # without this, `bundle exec rake test` fails with a LoadError even though
+  # plain `rake test` (no Bundler) works fine. Only discovered by actually
+  # running the CI workflow's exact `bundle exec` command locally, not
+  # assumed.
+  spec.add_development_dependency "minitest", "~> 5.0"
 end

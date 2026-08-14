@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # required_ruby_version in scryer.gemspec is >= 2.7.0 — test across
+        # that whole supported range, not just whatever's newest.
+        ruby-version: ["2.7", "3.0", "3.1", "3.2", "3.3"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+
+      - name: Syntax-check every Ruby file
+        run: find lib exe test benchmark -name '*.rb' | xargs -n1 ruby -c
+
+      - name: Run test suite
+        run: bundle exec rake test
+
+      - name: Run accuracy benchmark
+        run: bundle exec rake benchmark
+
+      - name: Build the gem (packaging sanity check)
+        run: gem build scryer.gemspec

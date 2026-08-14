@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for RubyGems Trusted Publishing (OIDC) — no stored API key
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      # Same gate CI already ran on the commit this tag points to, run again
+      # here as a last check before anything actually gets published.
+      - name: Run test suite
+        run: bundle exec rake test
+
+      - name: Run accuracy benchmark
+        run: bundle exec rake benchmark
+
+      # Builds scryer.gemspec and pushes to rubygems.org via OIDC trusted
+      # publishing — see README's "Releasing" section for the one-time setup
+      # this depends on (linking this repo + this exact workflow file to the
+      # scryer gem on rubygems.org). No RUBYGEMS_API_KEY secret needed or
+      # used anywhere in this workflow.
+      - name: Publish to RubyGems
+        uses: rubygems/release-gem@v1
