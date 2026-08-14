@@ -16,6 +16,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Rails default security header explicitly disabled"
+      self.cwe = "CWE-1021"
+      self.owasp_category = "A05:2021-Security Misconfiguration"
+      self.confidence = "high"
 
       HEADERS = ["X-Frame-Options", "X-Content-Type-Options"].freeze
 

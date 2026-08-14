@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Hardcoded HTTP Basic Auth credential"
+      self.cwe = "CWE-798"
+      self.owasp_category = "A07:2021-Identification and Authentication Failures"
+      self.confidence = "high"
 
       PLACEHOLDER_VALUES = /\A(x+|0+|change-?me|your[_-]?password|placeholder|example|dummy|fake|test|redacted|\*+)\z/i.freeze
 

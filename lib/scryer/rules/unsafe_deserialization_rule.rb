@@ -9,6 +9,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Unsafe deserialization of untrusted data"
+      self.cwe = "CWE-502"
+      self.owasp_category = "A08:2021-Software and Data Integrity Failures"
+      self.confidence = "high"
 
       UNSAFE_CALLS = {
         %w[Marshal load] => "Marshal.load can instantiate arbitrary Ruby objects, including ones " \

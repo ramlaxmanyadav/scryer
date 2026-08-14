@@ -1,0 +1,102 @@
+name: 'Scryer Security & Risk Audit'
+description: >-
+  Run Scryer (a Ruby/Rails application security & risk auditor covering security,
+  performance, dependencies, and code quality) and upload SARIF results to GitHub
+  Code Scanning.
+author: 'Ram Laxman Yadav'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  path:
+    description: 'Root directory to scan.'
+    required: false
+    default: '.'
+  ruby-version:
+    description: >-
+      Ruby version to set up via ruby/setup-ruby. Leave empty if a previous step in
+      this job already set up Ruby (e.g. via bundler-cache).
+    required: false
+    default: ''
+  scryer-version:
+    description: 'Scryer gem version to install. Leave empty for the latest release.'
+    required: false
+    default: ''
+  extra-args:
+    description: >-
+      Extra scryer CLI flags, e.g. "--skip idor --no-deps". See the README's CLI
+      flag reference for the full list.
+    required: false
+    default: ''
+  fail-on-findings:
+    description: >-
+      Fail this step if scryer reports any security or dependency finding — matches
+      scryer's own exit code (0 clean, 1 findings present). The SARIF upload still
+      runs either way; this only controls whether the job is marked failed
+      afterward.
+    required: false
+    default: 'true'
+  upload-sarif:
+    description: 'Upload the SARIF report to GitHub Code Scanning.'
+    required: false
+    default: 'true'
+
+outputs:
+  sarif-path:
+    description: 'Path to the generated SARIF report.'
+    value: ${{ steps.scan.outputs.sarif-path }}
+  json-path:
+    description: 'Path to the generated JSON report.'
+    value: ${{ steps.scan.outputs.json-path }}
+  exit-code:
+    description: 'Exit code scryer returned (0 = clean, 1 = findings present, 2 = usage error).'
+    value: ${{ steps.scan.outputs.exit-code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Ruby
+      if: inputs.ruby-version != ''
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+
+    - name: Install Scryer
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.scryer-version }}" ]; then
+          gem install scryer -v "${{ inputs.scryer-version }}"
+        else
+          gem install scryer
+        fi
+
+    # `set +e` + capturing $? explicitly, rather than letting the scryer
+    # command's own exit code fail this step, is deliberate: it lets the SARIF
+    # upload step below always run (even when findings were reported) instead
+    # of being skipped the way a genuinely failed step would skip everything
+    # after it. Whether the *job* ultimately fails is decided by the last step,
+    # after the upload has already happened — see the README's CI/CD section
+    # for why this ordering matters (the runs where results exist are exactly
+    # the runs where you still want them uploaded).
+    - name: Run Scryer
+      id: scan
+      shell: bash
+      run: |
+        set +e
+        scryer -p "${{ inputs.path }}" -o scryer-results.sarif -o scryer-results.json ${{ inputs.extra-args }}
+        echo "exit-code=$?" >> "$GITHUB_OUTPUT"
+        echo "sarif-path=scryer-results.sarif" >> "$GITHUB_OUTPUT"
+        echo "json-path=scryer-results.json" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: always() && inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-path }}
+
+    - name: Fail if findings were reported
+      if: always() && inputs.fail-on-findings == 'true' && steps.scan.outputs.exit-code != '0'
+      shell: bash
+      run: exit ${{ steps.scan.outputs.exit-code }}

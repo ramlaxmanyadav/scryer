@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Session cookie missing the secure flag"
+      self.cwe = "CWE-614"
+      self.owasp_category = "A05:2021-Security Misconfiguration"
+      self.confidence = "high"
 
       def scan
         findings = []

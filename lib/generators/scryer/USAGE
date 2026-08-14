@@ -28,13 +28,21 @@ Description:
                          useful. Leave unset to use the actual checked-out
                          branch.
 
-    Two more things ship in this gem but aren't controlled by the
-    initializer — see the README for both:
+    A few more things ship in this gem but aren't controlled by the
+    initializer — see the README for each:
 
       - Scryer::QueryWatcher: an opt-in runtime instrumentation for N+1
         queries and unused eager loading (README: "Runtime query watcher").
       - `bin/rails scryer:audit_dependencies`: a Gemfile.lock vulnerability
         + insecure-source audit against OSV.dev (README: "Dependency audit").
+      - `bin/rails scryer:ci`: a CI-friendly shortcut for
+        `scryer:report[json,sarif]` — JSON + SARIF output, dependency audit
+        on, same SCRYER_BASELINE support (README: "CI/CD integration").
+      - `require "scryer/rspec"` / `require "scryer/minitest"`: opt-in
+        matchers/assertions (`have_no_critical_findings`,
+        `assert_no_critical_scryer_findings`, ...) for asserting this app's
+        own scan stays clean as part of its normal test suite (README:
+        "Testing Scryer results in your own test suite").
 
 Example:
     bin/rails generate scryer:install

@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Unescaped HTML output (possible XSS)"
+      self.cwe = "CWE-79"
+      self.owasp_category = "A03:2021-Injection"
+      self.confidence = "high"
 
       # Rails helpers whose whole job is to hand back HTML that's already
       # safe to render unescaped, so a `.html_safe` immediately wrapped

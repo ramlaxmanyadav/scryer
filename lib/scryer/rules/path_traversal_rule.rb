@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Possible path traversal"
+      self.cwe = "CWE-22"
+      self.owasp_category = "A01:2021-Broken Access Control"
+      self.confidence = "medium"
 
       DANGEROUS_CALLS = {
         "File" => %w[join read open new write delete binread binwrite],

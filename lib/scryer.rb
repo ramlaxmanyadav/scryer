@@ -10,7 +10,9 @@ require "scryer/duplicate_detector"
 require "scryer/scanner"
 require "scryer/report_renderer"
 require "scryer/dependency_audit"
+require "scryer/baseline"
 require "scryer/ai_client"
+require "scryer/fix_verifier"
 require "scryer/ai_fix_suggester"
 
 Dir[File.join(__dir__, "scryer", "rules", "*.rb")].sort.each { |f| require f }
@@ -52,6 +54,19 @@ module Scryer
 
     def configuration
       @configuration ||= Configuration.new
+    end
+
+    # Runs the static scan with the current configuration (or explicit
+    # overrides) applied, without needing to know Scanner's own constructor
+    # shape. Exists mainly so the RSpec/Minitest test helpers (see
+    # lib/scryer/rspec.rb / lib/scryer/minitest.rb) — and any other future
+    # caller that just wants "the result of a normal scan" — don't each
+    # duplicate `Scanner.new(root:, dirs:, skip_rules:).call`. The CLI/rake
+    # task aren't changed to use this (they also handle dependency auditing,
+    # baselines, and report writing inline) — this is for callers that only
+    # need the static-scan Result itself.
+    def scan(root:, dirs: configuration.dirs, skip_rules: configuration.skip_rules)
+      Scryer::Scanner.new(root: root, dirs: dirs, skip_rules: skip_rules).call
     end
   end
 end

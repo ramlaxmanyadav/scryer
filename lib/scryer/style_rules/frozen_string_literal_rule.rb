@@ -12,6 +12,7 @@ module Scryer
       self.category = "style"
       self.default_severity = "info"
       self.title = "Missing `frozen_string_literal` magic comment"
+      self.confidence = "high"
 
       MAGIC_COMMENT = /\A#\s*frozen_string_literal:\s*(true|false)\s*\z/i.freeze
 

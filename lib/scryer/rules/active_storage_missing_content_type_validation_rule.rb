@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Active Storage attachment without a content-type validation"
+      self.cwe = "CWE-434"
+      self.owasp_category = "A04:2021-Insecure Design"
+      self.confidence = "medium"
 
       ATTACHMENT_METHODS = %w[has_one_attached has_many_attached].freeze
 

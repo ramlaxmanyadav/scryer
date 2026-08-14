@@ -11,6 +11,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "HTTPS enforcement explicitly disabled"
+      self.cwe = "CWE-319"
+      self.owasp_category = "A02:2021-Cryptographic Failures"
+      self.confidence = "high"
 
       def scan
         findings = []

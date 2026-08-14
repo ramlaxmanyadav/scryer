@@ -19,6 +19,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Raw params passed to a background job"
+      self.cwe = "CWE-532"
+      self.owasp_category = "A09:2021-Security Logging and Monitoring Failures"
+      self.confidence = "medium"
 
       PERFORM_METHODS = %w[perform_async perform_later perform_now].freeze
 

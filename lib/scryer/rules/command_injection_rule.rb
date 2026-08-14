@@ -9,6 +9,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Possible command injection via shell call"
+      self.cwe = "CWE-78"
+      self.owasp_category = "A03:2021-Injection"
+      self.confidence = "high"
 
       SHELL_METHODS = %w[system exec popen spawn].freeze
 

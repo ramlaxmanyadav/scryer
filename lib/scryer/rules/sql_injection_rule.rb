@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Possible SQL injection via string interpolation"
+      self.cwe = "CWE-89"
+      self.owasp_category = "A03:2021-Injection"
+      self.confidence = "high"
 
       QUERY_METHODS = %w[
         where find_by find_by! order pluck select group having

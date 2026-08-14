@@ -10,8 +10,27 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Unpermitted mass assignment from params"
+      self.cwe = "CWE-915"
+      self.owasp_category = "A08:2021-Software and Data Integrity Failures"
+      self.confidence = "medium"
 
       ASSIGNMENT_METHODS = %w[new create create! update update! assign_attributes attributes=].freeze
+
+      # `update`/`update!`/`assign_attributes`/`attributes=` on an instance
+      # variable (`@order.update(params[:order])`) is at least as common a
+      # real-world shape as `Model.new(...)`/`Model.create(...)` on a bare
+      # constant — the standard `before_action :set_thing` + `@thing.update`
+      # scaffold pattern — but was invisible to this rule entirely until
+      # found via the accuracy benchmark (benchmark/corpus.rb's
+      # "mass_assignment" vulnerable sample), since likely_model_receiver?
+      # only accepted a bare constant or implicit (nil) receiver. `.new`/
+      # `create`/`create!` deliberately stay constant/nil-only: those verbs
+      # only make sense as a receiver-less/class-level call in normal Rails
+      # code, whereas an ivar could just as easily be a plain Hash (`Hash#
+      # update` is a real `merge!` alias) — restricting the ivar allowance to
+      # only the update-style verbs keeps this from also matching things like
+      # `@filters.update(params[:filters])` on a Hash.
+      IVAR_RECEIVER_METHODS = %w[update update! assign_attributes attributes=].freeze
 
       # Common stdlib/gem constants with their own `.new`/`.create`-style
       # factory methods that have nothing to do with ActiveRecord mass
@@ -37,7 +56,7 @@ module Scryer
 
           receiver, method_name = receiver_and_name
           next unless ASSIGNMENT_METHODS.include?(method_name)
-          next unless likely_model_receiver?(receiver)
+          next unless likely_model_receiver?(receiver, method_name)
 
           args = Ast.call_arguments(node)
           next if args.empty?
@@ -64,17 +83,25 @@ module Scryer
       private
 
       # true for an implicit receiver (bare `create(...)` inside the model
-      # itself) or a plain unnamespaced constant reference (`Order`) that
-      # isn't a known non-model stdlib/gem constant; false for namespaced
-      # constant paths (`BCrypt::Password`) or anything else.
-      def likely_model_receiver?(receiver)
+      # itself), a plain unnamespaced constant reference (`Order`) that isn't
+      # a known non-model stdlib/gem constant, or — for the update-style
+      # verbs only, see IVAR_RECEIVER_METHODS — an instance variable
+      # (`@order`); false for namespaced constant paths (`BCrypt::Password`,
+      # `Admin::Order` — a real gap, see mass_assignment_rule's class comment
+      # and the benchmark corpus's "KNOWN LIMITATION" sample) or anything else.
+      def likely_model_receiver?(receiver, method_name)
         return true if receiver.nil?
+        return true if IVAR_RECEIVER_METHODS.include?(method_name) && ivar_receiver?(receiver)
         return false unless Ast.tagged?(receiver, :var_ref)
 
         const_node = receiver[1]
         return false unless const_node.is_a?(Array) && const_node[0] == :@const
 
         !NON_MODEL_RECEIVERS.include?(const_node[1])
+      end
+
+      def ivar_receiver?(node)
+        Ast.tagged?(node, :var_ref) && node[1].is_a?(Array) && node[1][0] == :@ivar
       end
 
       # True if `node` references `params` (see Ast.references_params?)

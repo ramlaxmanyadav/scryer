@@ -19,6 +19,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Hardcoded secret_key_base"
+      self.cwe = "CWE-798"
+      self.owasp_category = "A02:2021-Cryptographic Failures"
+      self.confidence = "high"
 
       PLACEHOLDER_VALUES = /\A(x+|0+|change-?me|placeholder|example|dummy|fake|test|redacted|\*+)\z/i.freeze
 

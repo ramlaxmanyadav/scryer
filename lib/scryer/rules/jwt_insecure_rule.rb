@@ -15,6 +15,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Insecure JWT.decode/JWT.encode usage"
+      self.cwe = "CWE-347"
+      self.owasp_category = "A02:2021-Cryptographic Failures"
+      self.confidence = "high"
 
       PLACEHOLDER_VALUES = /\A(x+|0+|change-?me|your[_-]?(secret|key)|placeholder|example|dummy|fake|test|redacted|\*+)\z/i.freeze
 

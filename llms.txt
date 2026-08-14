@@ -38,7 +38,7 @@ ranks, at best, within its own domain.
 
 ## What it detects
 
-- Security — 26 rules covering:
+- Security — 31 rules covering:
   - Classic web/Rails vulnerabilities: SQL injection, mass assignment, command injection,
     hardcoded secrets, unsafe deserialization, XSS-prone unescaped HTML, CSRF gaps, weak
     cryptography, open redirects.
@@ -59,7 +59,17 @@ ranks, at best, within its own domain.
   - Background jobs (`perform_async`/`perform_later`/`perform_now`) passed raw `params` — risks
     leaking request data into Sidekiq/ActiveJob logs, Redis, or the Sidekiq web UI.
   - GraphQL schemas with no query depth/complexity limit (`max_depth`/`max_complexity`).
+  - Rails config audit: `consider_all_requests_local`/verbose `log_level` left on in
+    `config/environments/production.rb` (both are normal Rails defaults in development/test and
+    only flagged in production), `config.hosts.clear` (disables Host-header allowlist protection).
+  - A write action (`create`/`update`/`destroy`) with no visible authorization check anywhere in
+    its controller, and a Pundit-using controller's `index` action querying a model directly
+    instead of through `policy_scope`.
   - [lib/scryer/rules/](https://github.com/ramlaxmanyadav/scryer/tree/main/lib/scryer/rules).
+  - Every security finding also carries a CWE ID, an OWASP Top 10 (2021) category, and a
+    confidence level (`high`/`medium`/`low`, distinct from severity) — Scryer's own best-effort
+    categorization, not an OWASP-audited mapping. Aggregated into an OWASP Top 10 coverage
+    scorecard in the console summary and HTML report.
 - Performance: N+1 queries, missing pagination, inefficient per-record saves, unbounded
   full-table iteration —
   [lib/scryer/performance_rules/](https://github.com/ramlaxmanyadav/scryer/tree/main/lib/scryer/performance_rules).
@@ -74,11 +84,20 @@ ranks, at best, within its own domain.
 - Runtime: an opt-in ActiveRecord query watcher for N+1s and unused eager loading as they
   actually happen in a running app —
   [lib/scryer/query_watcher.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/query_watcher.rb).
+  Plus an opt-in authorization watcher — registers one `after_action` and checks Pundit's/
+  CanCanCan's own internal "was authorize actually called" flags to catch a write action that
+  completed with neither library's check invoked; Pundit/CanCanCan-only (silently a no-op
+  otherwise), write-actions-only (no read/index-scoping coverage) —
+  [lib/scryer/authorization_watcher.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/authorization_watcher.rb).
 
 ## Report formats
 
 - JSON, self-contained HTML, CSV — and SARIF 2.1.0, for GitHub Code Scanning / CI dashboards that
-  ingest SARIF natively (inline PR annotations, Security tab).
+  ingest SARIF natively (inline PR annotations, Security tab). SARIF results carry CWE tags
+  (`external/cwe/cwe-NN`), the OWASP category, confidence, and a combined severity+confidence
+  `rank` for prioritization.
+- [`action.yml`](https://github.com/ramlaxmanyadav/scryer/blob/main/action.yml) — a reusable
+  GitHub Action (`uses: ramlaxmanyadav/scryer@<version>`) wrapping install + scan + SARIF upload.
 
 ## CLI
 
@@ -94,13 +113,29 @@ ranks, at best, within its own domain.
   `bundle-audit check`).
 - `scryer -r PATH` — require a Ruby file before scanning, so `Scryer.configure` can run outside
   Rails.
+- `scryer verify --rule RULE_ID --file PATH` — re-runs one rule against one file (independent of a
+  full scan) to confirm a fix actually cleared the finding it targeted; exits 0 clean / 1 still
+  firing. `--list-rules` prints every known rule_id.
 - Full flag reference:
   [lib/scryer/cli.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/cli.rb).
+
+## Testing
+
+- `require "scryer/rspec"` / `require "scryer/minitest"` — opt-in matchers/assertions
+  (`have_no_critical_findings`, `have_no_findings_for(rule_id)`,
+  `Scryer::MinitestAssertions#assert_no_critical_scryer_findings`) so a host app can assert its own
+  scan stays clean as part of its normal test suite. `Scryer.scan(root:)` backs both. Neither loads
+  automatically with the gem.
+- Scryer's own rules have a Minitest suite (`rake test` from the repo root) — a bad/clean fixture
+  pair per registered rule plus a completeness check —
+  [test/rule_fixtures_test.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/test/rule_fixtures_test.rb).
 
 ## Rails integration
 
 - `bin/rails generate scryer:install` then `bin/rails scryer:report` — same capabilities as the
   CLI, via a Railtie-registered rake task; no Rails `:environment` dependency.
+- `bin/rails scryer:ci` — a memorable shortcut for `scryer:report[json,sarif]`'s CI-sensible
+  defaults (JSON + SARIF, dependency audit on, same SCRYER_BASELINE support).
 - Config: `Scryer.configure { |c| ... }` in `config/initializers/scryer.rb` —
   `project_name`, `dirs`, `branch`, `skip_rules`, `ai_client` —
   [lib/scryer.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer.rb).
@@ -109,7 +144,16 @@ ranks, at best, within its own domain.
 
 - [AI-assisted fix suggestions](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md#ai-assisted-fix-suggestions):
   provider-agnostic — configure any LLM (Claude, OpenAI, a local model, or a bare lambda) to
-  rewrite each finding's `suggested_fix` against its actual code.
+  rewrite each finding's `suggested_fix` against its actual code, and (see
+  [Verifying a fix](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md#verifying-a-fix))
+  automatically re-scanned to confirm each rewritten fix actually clears the finding it targeted.
 - [Comparison vs RuboCop/Brakeman/bundler-audit](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit):
   capability-by-capability breakdown, including where Scryer's heuristic approach is honestly
   weaker than Brakeman's taint analysis.
+- [Accuracy benchmark](https://github.com/ramlaxmanyadav/scryer/blob/main/benchmark/README.md)
+  (`rake benchmark` / `ruby benchmark/run.rb`): a hand-labeled corpus of `vulnerable`/`safe`
+  Ruby/Rails snippets per rule (all 36 registered rules, 180 samples), run through the real
+  `Rule#scan` path, reporting measured precision/recall/F1 — current aggregate: 98.8% precision,
+  96.5% recall, 97.6% F1. Explicitly a self-authored corpus for stress-testing Scryer's own rules,
+  not an independent third-party benchmark — see the honesty caveat in
+  [benchmark/README.md](https://github.com/ramlaxmanyadav/scryer/blob/main/benchmark/README.md).

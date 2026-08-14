@@ -91,6 +91,32 @@ module Scryer
       node[1] if node[0].is_a?(Symbol) && %i[@ident @const @kw @op].include?(node[0])
     end
 
+    # The full dotted name from a class/module's own name node — the second
+    # element of a `[:class, name_node, superclass, body]` sexp. A plain
+    # `class Foo` parses name_node as `[:const_ref, [:@const, "Foo", pos]]`;
+    # a namespaced `class Admin::PostsController` parses it as a
+    # `:const_path_ref` chain instead (verified via `Ripper.sexp` —
+    # `Api::V1::UsersController` nests two levels deep: `[:const_path_ref,
+    # [:const_path_ref, [:var_ref, [:@const,"Api"]], [:@const,"V1"]],
+    # [:@const,"UsersController"]]`). Several rules used to check only the
+    # `:const_ref` shape (`node[1][1]` via `ident_text`), so a namespaced
+    # controller's class name silently came back nil and the whole class was
+    # never examined — a real false-negative gap, not a minor edge case,
+    # given how common namespacing (admin areas, API versions) is in real
+    # Rails apps. Returns e.g. "Admin::PostsController" so a plain
+    # `.end_with?("Controller")` check still works the same either way.
+    def class_name(node)
+      if tagged?(node, :const_ref)
+        ident_text(node[1])
+      elsif tagged?(node, :var_ref) && node[1].is_a?(Array) && node[1][0] == :@const
+        node[1][1]
+      elsif tagged?(node, :const_path_ref)
+        left = class_name(node[1])
+        right = ident_text(node[2])
+        [left, right].compact.join("::")
+      end
+    end
+
     # Given a [:method_add_arg, call_node, args_node] or [:command, ident, args_node]
     # node, return the flattened list of top-level argument sexp nodes (best effort —
     # walks through the [:arg_paren, [:args_add_block, [args...], block]] wrapping).

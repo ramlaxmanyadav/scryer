@@ -11,6 +11,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Action Cable request forgery protection explicitly disabled"
+      self.cwe = "CWE-352"
+      self.owasp_category = "A01:2021-Broken Access Control"
+      self.confidence = "high"
 
       def scan
         findings = []

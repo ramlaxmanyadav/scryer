@@ -5,6 +5,167 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-14
+
+- `Scryer::AuthorizationWatcher` (`require "scryer/authorization_watcher"`, opt-in): a runtime
+  companion to the static `idor`/`missing_authorization`/`missing_policy_scope` rules. Registers
+  one `after_action` and checks Pundit's `pundit_policy_authorized?`/`pundit_policy_scoped?` and
+  CanCanCan's `@_authorized` (both real, verified-by-reading-the-actual-gem-source signals, not
+  guessed) to catch a write action (`create`/`update`/`destroy`, or any `POST`/`PUT`/`PATCH`/
+  `DELETE`) that completed successfully with neither library's authorization check actually
+  invoked during that request — a live, much lower-false-positive-risk signal than the static
+  rules, which can only ever see "no call is visible in this file's source," not whether it ran.
+  Silently a no-op on apps using neither library (checked per-request, not just at boot). Verified
+  end-to-end against real `ActionController::Base`/`ActionController::API` + real installed
+  `pundit`/`cancancan` gems (not mocked) — 7 scenarios (authorized, unauthorized,
+  GET-to-a-write-action-name, plain read action, both libraries, neither library present, an
+  API-only base class) all behave as designed.
+- Accuracy benchmark (`benchmark/`): a hand-labeled corpus of `vulnerable`/`safe` Ruby/Rails
+  snippets per rule, run through the real `Rule#scan` path, reporting measured precision/recall/F1
+  per rule and in aggregate (`rake benchmark` / `ruby benchmark/run.rb`) — replacing "expect some
+  false positives, that's normal for this class of tool" with an actual number. Explicitly framed
+  as a synthetic, self-authored corpus, not an independent benchmark — see `benchmark/README.md`'s
+  honesty caveat. Directly caught a real bug while building it: `mass_assignment` never fired on
+  `@record.update(params[...])` (an instance-variable receiver) — only a bare constant or implicit
+  receiver was ever recognized as "likely a model" — even though that's at least as common a
+  real-world shape as `Model.new(...)`. Fixed (`IVAR_RECEIVER_METHODS`, scoped to `update`/
+  `update!`/`assign_attributes`/`attributes=` only, not `new`/`create`/`create!`, to avoid matching
+  `Hash#update`-style receivers) and verified against the full test suite and a real external app
+  with zero regressions. Now populated for all 36 registered rules, 180 hand-labeled samples total:
+  **82 TP / 3 FN / 1 FP / 94 TN — 98.8% precision, 96.5% recall, 97.6% F1** (`rake benchmark`). The
+  two rules scoring below 100% (`graphql_missing_query_limits`, `unbounded_table_scan`) are gaps
+  already disclosed in each rule's own top comment before this benchmark existed — this just
+  measured them for the first time instead of only asserting them.
+- Test suite: Scryer's own rules now have automated coverage — `rake test` (Minitest, no new
+  runtime dependency) runs a bad/clean fixture pair against every one of the 36 registered rules,
+  plus a completeness check that fails if a new rule ships with no fixture. Previously this gem had
+  zero automated tests of its own; every rule change was verified by hand against ad hoc fixtures
+  and a real external Rails app each time. 37/37 passing, 0 rule bugs found while building the
+  fixtures — every rule's fixture behaved exactly as its own doc comment described.
+- Testing: two new opt-in files let a host app assert its own scan stays clean as part of its
+  normal test suite instead of only via a separate `scryer` run — `require "scryer/rspec"`
+  (`have_no_critical_findings`, `have_no_findings_for(rule_id)` matchers) and
+  `require "scryer/minitest"` (`Scryer::MinitestAssertions#assert_no_critical_scryer_findings`/
+  `#assert_no_scryer_findings_for`). Neither loads automatically with the gem (RSpec/Minitest stay
+  out of the runtime dependency list). New `Scryer.scan(root:)` convenience method backs both,
+  reusing `c.dirs`/`c.skip_rules` from the host app's own configuration.
+- `scryer verify --rule RULE_ID --file PATH`: a new CLI subcommand that re-parses one file and
+  re-runs one rule against it, independent of a full scan — confirms a specific fix actually
+  cleared the finding it targeted (exit 0 clean / 1 still firing), meant to run right after
+  applying a fix by hand or reviewing an AI-suggested one. `--list-rules` prints every known
+  rule_id.
+- AI-verified remediation: when an `ai_client` is configured, every AI-rewritten `suggested_fix` is
+  now automatically re-checked — the rewritten line is substituted into an in-memory copy of the
+  real file (nothing written to disk) and the same rule is re-run against it. Each finding gets a
+  new `fix_verified` field (`true`/`false`/`nil`; JSON/HTML only — CSV/SARIF unchanged), and the
+  HTML report shows a green "AI fix verified" or red "AI fix NOT verified" line under the suggested
+  fix. Required extending the AI prompt to ask for a machine-parseable `AFTER:` code block as the
+  last thing in the model's reply (`Scryer::FixVerifier` parses it); shares its core re-scan logic
+  with `scryer verify` above.
+- 3 new Rails config-audit rules, all file-scoped to avoid flagging Rails' own development/test
+  defaults: `consider_all_requests_local_production` (`config.consider_all_requests_local = true`
+  in `config/environments/production.rb` — shows full debug error pages in production; critical,
+  CWE-209), `verbose_production_log_level` (`config.log_level = :debug` in production — logs full
+  request params and SQL bind values; warning, CWE-532), `host_authorization_disabled`
+  (`config.hosts.clear` — disables Rails' Host-header allowlist entirely; any file, warning,
+  CWE-350). 31 security rules total now (up from 28), 36 registered rules overall.
+- Generators: the generated `config/initializers/scryer.rb` now shows commented examples for
+  `c.skip_rules` and `c.ai_client`, not just `project_name`/`dirs`/`branch` — both were already
+  documented in USAGE but missing from the actual template. New `bin/rails scryer:ci` rake task —
+  a memorable shortcut for `scryer:report[json,sarif]`'s CI-sensible defaults.
+- HTML report: every count in the Summary table and the "Warnings by type" table now links to the
+  matching findings, same click-to-drill-down as the OWASP coverage table and severity chart —
+  the Warnings-by-type rule-id column already linked to its rule group, but the count column next
+  to it didn't; Summary's category × severity cells (e.g. "Security × Critical") had no existing
+  anchor to link to at all, so each finding now carries a category tag (`security`/`performance`/
+  `style`, alongside the existing CWE/OWASP/confidence tags) and the search filter was extended to
+  match multiple space-separated terms (all required, not a literal multi-word phrase) so a cell
+  like that can link with a two-word filter (`security critical`) precisely. Renamed the
+  `.owasp-link` CSS class to `.filter-link` throughout, since it's no longer OWASP-specific.
+- HTML report: the severity distribution chart's counts (Critical/Warning/Info, at the very top
+  next to the score badge) are now links to the matching section under Findings — same
+  click-to-drill-down as the OWASP coverage table's counts. The Findings filter box now also
+  applies to Top priorities (a non-matching item hides, same as a non-matching finding elsewhere
+  — previously Top priorities never changed at all while filtering), and any finding matched by
+  an active filter (typed or via a click-through link) gets a visible highlight, not just "still
+  shown" — the point of filtering/linking is to show *which* finding is the target, not just to
+  hide the rest.
+- HTML report: each finding now shows its CWE ID, OWASP category, and confidence level as small
+  tags (previously this data existed in JSON/CSV/SARIF but was never actually displayed per-finding
+  in the HTML report, even though the OWASP coverage scorecard summarized it). The Findings search
+  box matches on these tags for free, and the OWASP coverage table's counts are now links that
+  jump to Findings with that exact category pre-filled into the search — the aggregate count and
+  the underlying findings are one click apart instead of two disconnected views.
+- New **Security Score** — `ReportRenderer#security_score` combines every security + dependency
+  finding's severity and confidence into a single 0-100 number and a letter grade (A-F), via
+  exponential decay from 100 (not linear subtraction, so a handful of findings doesn't
+  hard-clamp every real app to 0). Shown in the console summary (`Security Score: 11/100 (F)`)
+  and as a badge + severity distribution chart at the very top of the HTML report. Deliberately
+  NOT normalized by app size — see the README's new "Security score" section for what that means
+  and doesn't mean. Performance/code-quality findings aren't part of it (this is a *security*
+  score).
+- New **rules-clean-rate** — `ReportRenderer#rules_clean_rate` reports "N/M rules clean," a
+  rule-level pass rate (how many of the registered checks fired zero findings) distinct from the
+  finding-weighted security score — printed alongside it (`Checks: 20/33 rules clean (60.6%)`)
+  and in the HTML score panel.
+- HTML report: leads with the score badge + severity chart, then Overview/Summary/OWASP
+  coverage, collapsed-by-default "Checks performed" reference tables, and the Findings section —
+  Top priorities first, then a new text search/filter box (rule/file/message, plain JS, no page
+  reload) above the severity-grouped, accordion-collapsed finding list.
+- Removed the report footer's "heuristic static analysis, not full data-flow/taint analysis —
+  review every finding in its surrounding context" line — the caveat itself hasn't changed
+  (still true, still documented at length in the README and in individual rule comments), but
+  repeating it on every single generated report read as undermining confidence in the tool
+  rather than informing. The `Generated by Scryer vX (Ruby Y)` attribution stays.
+- New **baseline mode** — `scryer --save-baseline PATH` snapshots every current finding
+  (security/performance/style/dependency) as a set of fingerprints; `scryer --baseline PATH`
+  on a later scan reports only findings new since that snapshot (plus how many were fixed),
+  so an app with real pre-existing security debt can gate CI on new issues without being forced
+  to fix everything on day one. Fingerprints are `rule_id`/`kind` + file/gem + offending source
+  text — deliberately NOT tied to line number, so an unrelated edit earlier in the same file
+  doesn't make an existing finding look simultaneously new and fixed. Rails/rake equivalent:
+  `rails 'scryer:save_baseline[PATH]'` to save, `SCRYER_BASELINE=PATH rails scryer:report` to
+  compare (an env var rather than another bracket-arg token, since rake's arg parsing was
+  already stretched thin). See `Scryer::Baseline` (`lib/scryer/baseline.rb`) and the README's
+  new "Baseline mode" section.
+- Fixed a real, shared precision bug affecting `idor`, `authentication_bypass`, and
+  `csrf_protection_disabled`: all three checked whether a class was a controller via a class-name
+  extraction that only handled a plain `class Foo` — a namespaced class (`class
+  Admin::PostsController`, `class Api::V1::UsersController`) parses its name as a different Ripper
+  shape (`:const_path_ref`, not `:const_ref`), so the class name came back `nil` and the whole
+  class was silently never examined by any of the three rules. Fixed with a new shared
+  `Ast.class_name` helper (verified against `Ripper.sexp` for 2- and 3-level namespacing) and
+  re-verified against a real production Rails app ("acme-app" elsewhere in these docs), which uses
+  namespacing extensively:
+  `idor` findings 2 → 4, `csrf_protection_disabled` 0 → 3, all genuinely namespaced controllers
+  that were previously invisible to these checks.
+- New `idor`-adjacent rules, broadening authorization coverage beyond IDOR's specific
+  find-with-no-guard pattern:
+  - `missing_authorization` — a controller's `create`/`update`/`destroy` action with no
+    authorization evidence anywhere in the class (catches write actions that don't call `.find`
+    at all, which `idor` can't see).
+  - `missing_policy_scope` — a Pundit-using controller's `index` action querying a model
+    directly instead of through `policy_scope` — the common "remembered `authorize`, forgot
+    `policy_scope`" gotcha, since `index` has no single record for `authorize` to check.
+- Every security rule (all 28) now carries a **CWE ID**, an **OWASP Top 10 (2021) category**, and
+  a **confidence level** (`high`/`medium`/`low`, distinct from `severity` — see `Rule.confidence`
+  in `lib/scryer/rule.rb`). All three appear on every `Finding` and flow through every report
+  format (new JSON fields, new CSV columns, and in SARIF: `external/cwe/cwe-NN` + the OWASP
+  category as rule-level `tags`, plus `confidence`/`cwe`/`owasp_category` as per-result
+  `properties` and a combined severity+confidence `rank`). Performance/style rules get a
+  `confidence` too (no CWE/OWASP — that taxonomy is security-specific). This is Scryer's own
+  best-effort categorization for practitioner convenience, not an OWASP-endorsed or independently
+  audited mapping — see the README's "What Scryer detects" section for the full caveat. Brakeman
+  already tags CWE and reports a confidence level for its own warnings; this isn't a novel
+  capability, just a fuller version of something that idea already existed elsewhere (see the
+  comparison table's new footnote).
+- New `ReportRenderer#owasp_coverage` — counts security findings per OWASP Top 10 category, shown
+  as a console summary block ("OWASP Top 10 (2021) coverage:") and a new HTML report section, a
+  direct byproduct of every security rule now carrying an `owasp_category`.
+- New [`action.yml`](action.yml) — a reusable composite GitHub Action wrapping install + scan +
+  SARIF upload, correctly ordered so the upload still happens on runs where findings were found
+  (previously only documented as a manual YAML snippet in the README's CI/CD section, which still
+  works and is kept as the "full control" alternative).
 - New `ReportRenderer#top_risks` — merges every severity-bearing finding from a scan (security,
   performance, code quality, and dependencies) into one list, sorted by severity first and
   category second, so a scan produces one ranked "what to fix first" answer instead of four
@@ -17,9 +178,16 @@ All notable changes to this project are documented here. Format loosely follows
 - HTML report: the "Checks performed" section's three rule-reference tables (Security/
   Performance/Style — every rule that *can* fire, not what actually did) are now collapsed-by-
   default accordions instead of always-expanded tables, matching the same pattern individual rule
-  groups under Findings already used. With 26 security rules alone, showing all three tables
+  groups under Findings already used. With 28 security rules alone, showing all three tables
   expanded on load buried Findings and Top priorities under a wall of reference rows nobody asked
   to see first.
+- HTML report: "Duplicate code groups" moved to after "Dependency audit"/"Files that couldn't be
+  parsed", as the last section before the footer.
+- Fixed: the "Dependency audit" section's "Expand all"/"Collapse all" controls did nothing —
+  dependency findings rendered as plain, always-expanded `.finding` divs, never actually wrapped
+  in the `.accordion` markup those buttons operate on. Each of the 24 dependency findings in a
+  typical scan is now its own collapsed-by-default accordion, same pattern as Findings/Checks
+  performed.
 - Repositioned the README, gemspec, docs site, and llms.txt around this: Scryer's differentiator
   isn't "one command instead of several tools," it's ranking risk *across* security, performance,
   dependencies, and code quality — something none of RuboCop/Brakeman/bundler-audit do even

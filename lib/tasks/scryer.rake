@@ -16,7 +16,9 @@ namespace :scryer do
        "so pass each token as its own item rather than one comma-joined string. " \
        "e.g. rails scryer:report, rails 'scryer:report[html]', " \
        "rails 'scryer:report[json,doc/security.json]', rails 'scryer:report[json,html]', " \
-       "rails 'scryer:report[html,nodeps]', rails 'scryer:report[csv]', rails 'scryer:report[sarif]'"
+       "rails 'scryer:report[html,nodeps]', rails 'scryer:report[csv]', rails 'scryer:report[sarif]'. " \
+       "Set SCRYER_BASELINE=PATH (an env var, not a bracket arg — see scryer:save_baseline) to " \
+       "report only findings new since that baseline was saved."
   task :report, [:format] do |_, args|
     root = defined?(Rails) ? Rails.root.to_s : Dir.pwd
     dirs = Scryer.configuration.dirs
@@ -42,9 +44,23 @@ namespace :scryer do
                              Scryer::DependencyAudit.ruby_eol_check(root) + Scryer::DependencyAudit.credentials_exposure_check(root)
     end
 
+    # Rake bracket args are already stretched thin (format tokens + nodeps +
+    # one output path) — an ENV var is the more conventional way Rails rake
+    # tasks take an extra config value without overloading positional args
+    # further. `rails 'scryer:save_baseline[tmp/scryer_baseline.json]'` writes
+    # one; `SCRYER_BASELINE=tmp/scryer_baseline.json rails scryer:report`
+    # reads it back. See Scryer::Baseline / the CLI's --baseline flag for
+    # what this actually does (fingerprint-based new-vs-fixed diffing, not
+    # tied to line number).
+    baseline_path = blank_to_nil(ENV["SCRYER_BASELINE"])
+    fixed_count = 0
+    if baseline_path
+      dependency_findings, fixed_count = ScryerTasks.apply_baseline(baseline_path, result, dependency_findings)
+    end
+
     if Scryer.configuration.ai_client
       puts "Scryer: rewriting suggested fixes via the configured AI client..."
-      Scryer::AiFixSuggester.enhance_result!(result)
+      Scryer::AiFixSuggester.enhance_result!(result, root: root)
       Scryer::AiFixSuggester.enhance_many!(dependency_findings) unless dependency_findings.empty?
     end
 
@@ -70,7 +86,8 @@ namespace :scryer do
       File.write(path, content)
     end
 
-    ScryerTasks.print_summary(result: result, dependency_findings: dependency_findings, ran_deps: run_deps, paths: paths, renderer: renderer)
+    ScryerTasks.print_summary(result: result, dependency_findings: dependency_findings, ran_deps: run_deps, paths: paths,
+                               renderer: renderer, fixed_count: fixed_count, baseline_path: baseline_path)
 
     # Same gate as the `scryer` executable and scryer:audit_dependencies
     # below: fail the task (and so the CI job running it) on any security or
@@ -81,6 +98,37 @@ namespace :scryer do
       abort("Scryer: found #{result.security_findings.size} security finding(s) and " \
             "#{dependency_findings.size} dependency finding(s).")
     end
+  end
+
+  desc "Convenience wrapper for CI: runs scryer:report with CI-sensible defaults — JSON + " \
+       "SARIF written under tmp/ (SARIF for GitHub Code Scanning / similar dashboards, JSON as " \
+       "the machine-readable form other CI steps can parse), dependency audit on, same " \
+       "SCRYER_BASELINE support and same fail-the-build-on-findings behavior as scryer:report. " \
+       "Equivalent to `rails 'scryer:report[json,sarif]'` under a name that doesn't require " \
+       "remembering the bracket-arg syntax. e.g. rails scryer:ci"
+  task :ci do
+    Rake::Task["scryer:report"].invoke("json", "sarif")
+  end
+
+  desc "Run Scryer and save every finding's fingerprint to PATH, for later comparison via " \
+       "SCRYER_BASELINE=PATH rails scryer:report (see that task's SCRYER_BASELINE note). " \
+       "Runs the same scan as scryer:report (including the dependency audit) but writes no " \
+       "report files. e.g. rails 'scryer:save_baseline[tmp/scryer_baseline.json]'"
+  task :save_baseline, [:path] do |_, args|
+    path = args[:path] || abort("Scryer: scryer:save_baseline needs a path, " \
+                                 "e.g. rails 'scryer:save_baseline[tmp/scryer_baseline.json]'")
+    root = defined?(Rails) ? Rails.root.to_s : Dir.pwd
+    dirs = Scryer.configuration.dirs
+
+    result = Scryer::Scanner.new(root: root, dirs: dirs, skip_rules: Scryer.configuration.skip_rules).call
+    puts "Scryer: querying OSV.dev for known-vulnerable gems (needs network)..."
+    dependency_findings = Scryer::DependencyAudit.insecure_sources(root) + Scryer::DependencyAudit.vulnerable_gems(root) +
+                           Scryer::DependencyAudit.ruby_eol_check(root) + Scryer::DependencyAudit.credentials_exposure_check(root)
+
+    all_findings = (result.security_findings + result.performance_findings + result.style_findings).map(&:to_h) +
+                   dependency_findings.map(&:to_h)
+    Scryer::Baseline.save(path, all_findings)
+    puts "Scryer: saved baseline of #{all_findings.size} finding(s) to #{path}."
   end
 
   desc "Check Gemfile.lock for known-vulnerable gem versions (via OSV.dev — needs network) " \
@@ -190,11 +238,40 @@ module ScryerTasks
     "#{f.gem_name} #{f.installed_version}: #{f.title}"
   end
 
+  # Same logic as Scryer::CLI#apply_baseline (see that method's comment for
+  # why fixed_count has to be computed once against the combined set of
+  # every category's current fingerprints, not once per category summed).
+  def apply_baseline(path, result, dependency_findings)
+    baseline_fingerprints = Scryer::Baseline.load(path)
+
+    security_hashes = result.security_findings.map(&:to_h)
+    performance_hashes = result.performance_findings.map(&:to_h)
+    style_hashes = result.style_findings.map(&:to_h)
+    dependency_hashes = dependency_findings.map(&:to_h)
+
+    all_current_fingerprints = Scryer::Baseline.fingerprints(security_hashes + performance_hashes + style_hashes + dependency_hashes)
+    fixed_count = (baseline_fingerprints - all_current_fingerprints.to_set).size
+
+    result.security_findings = filter_new(result.security_findings, security_hashes, baseline_fingerprints)
+    result.performance_findings = filter_new(result.performance_findings, performance_hashes, baseline_fingerprints)
+    result.style_findings = filter_new(result.style_findings, style_hashes, baseline_fingerprints)
+    filtered_deps = filter_new(dependency_findings, dependency_hashes, baseline_fingerprints)
+
+    [filtered_deps, fixed_count]
+  rescue Scryer::Baseline::LoadError => e
+    abort("Scryer: #{e.message}")
+  end
+
+  def filter_new(objects, hashes, baseline_fingerprints)
+    fingerprints = Scryer::Baseline.fingerprints(hashes)
+    objects.each_with_index.reject { |_, i| baseline_fingerprints.include?(fingerprints[i]) }.map(&:first)
+  end
+
   # The "one audit command" summary — a single scan's worth of every
   # category Scryer covers (security, performance, duplicate/smelly code,
   # dependencies), the same categories usually split across RuboCop +
   # Brakeman + bundler-audit + Reek, side by side in one box.
-  def print_summary(result:, dependency_findings:, ran_deps:, paths:, renderer:)
+  def print_summary(result:, dependency_findings:, ran_deps:, paths:, renderer:, fixed_count: 0, baseline_path: nil)
     # "Code Quality" is the umbrella label for both duplicate-code groups
     # and rule-based style findings (e.g. frozen_string_literal) — two
     # different detectors, same broad concern, one row in the box.
@@ -210,15 +287,25 @@ module ScryerTasks
     ]
 
     divider = "─" * 32
+    score = renderer.security_score
     puts ""
     puts "Scryer Audit — #{result.files_scanned} files scanned"
     puts divider
+    puts ""
+    if baseline_path
+      puts "Baseline: #{baseline_path} — showing new findings only (#{fixed_count} fixed since baseline)."
+      puts ""
+    end
+    clean_rate = renderer.rules_clean_rate
+    puts "Security Score: #{score["score"]}/100 (#{score["grade"]})"
+    puts "Checks: #{clean_rate["clean"]}/#{clean_rate["total"]} rules clean (#{clean_rate["percent"]}%)"
     puts ""
     rows.each { |label, count| puts summary_row(label, count) }
     puts divider
     puts summary_row("Total", total)
     puts ""
     print_top_priorities(renderer.top_risks)
+    print_owasp_coverage(renderer.owasp_coverage)
     paths.each { |format, path| puts "#{format.upcase} report: #{path}" }
   end
 
@@ -238,6 +325,17 @@ module ScryerTasks
     risks.each_with_index do |r, i|
       puts "  #{i + 1}. [#{r[:severity]}] #{r[:category]} — #{r[:label]} (#{r[:location]})"
     end
+    puts ""
+  end
+
+  # Byproduct of every security rule carrying an owasp_category — see
+  # ReportRenderer#owasp_coverage. Scryer's own best-effort tagging, not an
+  # OWASP-audited mapping (documented in full in the README).
+  def print_owasp_coverage(coverage)
+    return if coverage.empty?
+
+    puts "OWASP Top 10 (2021) coverage:"
+    coverage.each { |category, count| puts "  #{category}: #{count} finding#{"s" unless count == 1}" }
     puts ""
   end
 end

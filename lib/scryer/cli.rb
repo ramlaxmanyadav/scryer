@@ -21,6 +21,12 @@ module Scryer
     # found (so `scryer -o report.json` can gate CI the way `brakeman -o
     # report.json` does), 2 on a usage error.
     def run
+      # `scryer verify` is a distinct subcommand, not a flag on the normal
+      # scan — it takes its own small option set (--rule/--file/--path) that
+      # would collide with the main parser's -p/-o meanings, so it's
+      # dispatched before the main OptionParser ever sees the rest of argv.
+      return run_verify(@argv[1..]) if @argv.first == "verify"
+
       options = parse(@argv)
       return 0 if options[:exit_early]
 
@@ -54,9 +60,16 @@ module Scryer
                                DependencyAudit.ruby_eol_check(root) + DependencyAudit.credentials_exposure_check(root)
       end
 
+      return save_baseline(options[:save_baseline], result, dependency_findings) if options[:save_baseline]
+
+      fixed_count = 0
+      if options[:baseline]
+        dependency_findings, fixed_count = apply_baseline(options[:baseline], result, dependency_findings)
+      end
+
       if Scryer.configuration.ai_client
         @stdout.puts "Scryer: rewriting suggested fixes via the configured AI client..."
-        AiFixSuggester.enhance_result!(result)
+        AiFixSuggester.enhance_result!(result, root: root)
         AiFixSuggester.enhance_many!(dependency_findings) unless dependency_findings.empty?
       end
 
@@ -72,7 +85,8 @@ module Scryer
       outputs = options[:outputs].empty? ? default_outputs(root) : options[:outputs]
       outputs.each { |path| write_report(renderer, path) }
 
-      print_summary(result: result, dependency_findings: dependency_findings, ran_deps: ran_deps, outputs: outputs, renderer: renderer)
+      print_summary(result: result, dependency_findings: dependency_findings, ran_deps: ran_deps, outputs: outputs,
+                    renderer: renderer, fixed_count: fixed_count, baseline_path: options[:baseline])
 
       result.security_findings.empty? && dependency_findings.empty? ? 0 : 1
     rescue UsageError => e
@@ -118,7 +132,7 @@ module Scryer
     # category Scryer covers (security, performance, duplicate/smelly code,
     # dependencies), the same categories usually split across RuboCop +
     # Brakeman + bundler-audit + Reek, side by side in one box.
-    def print_summary(result:, dependency_findings:, ran_deps:, outputs:, renderer:)
+    def print_summary(result:, dependency_findings:, ran_deps:, outputs:, renderer:, fixed_count: 0, baseline_path: nil)
       # "Code Quality" is the umbrella label for both duplicate-code groups
       # and rule-based style findings (e.g. frozen_string_literal) — two
       # different detectors, same broad concern, one row in the box.
@@ -134,15 +148,26 @@ module Scryer
       ]
 
       divider = "─" * 32
+      score = renderer.security_score
       @stdout.puts ""
       @stdout.puts "Scryer Audit — #{result.files_scanned} files scanned"
       @stdout.puts divider
+      @stdout.puts ""
+      if baseline_path
+        @stdout.puts "Baseline: #{baseline_path} — showing new findings only " \
+                     "(#{fixed_count} fixed since baseline)."
+        @stdout.puts ""
+      end
+      clean_rate = renderer.rules_clean_rate
+      @stdout.puts "Security Score: #{score["score"]}/100 (#{score["grade"]})"
+      @stdout.puts "Checks: #{clean_rate["clean"]}/#{clean_rate["total"]} rules clean (#{clean_rate["percent"]}%)"
       @stdout.puts ""
       rows.each { |label, count| @stdout.puts summary_row(label, count) }
       @stdout.puts divider
       @stdout.puts summary_row("Total", total)
       @stdout.puts ""
       print_top_priorities(renderer.top_risks)
+      print_owasp_coverage(renderer.owasp_coverage)
       outputs.each { |path| @stdout.puts "#{format_for(path).upcase} report: #{path}" }
     end
 
@@ -165,6 +190,85 @@ module Scryer
       @stdout.puts ""
     end
 
+    # Byproduct of every security rule carrying an owasp_category — see
+    # ReportRenderer#owasp_coverage. Scryer's own best-effort tagging, not an
+    # OWASP-audited mapping (documented in full in the README).
+    def print_owasp_coverage(coverage)
+      return if coverage.empty?
+
+      @stdout.puts "OWASP Top 10 (2021) coverage:"
+      coverage.each { |category, count| @stdout.puts "  #{category}: #{count} finding#{"s" unless count == 1}" }
+      @stdout.puts ""
+    end
+
+    # `scryer verify --rule RULE_ID --file PATH` — re-parses just that one
+    # file and re-runs just that one rule against it, independent of a full
+    # scan. Meant to run right after applying a fix (by hand or via an LLM)
+    # to confirm the specific finding it targeted is actually gone, without
+    # waiting on/paying for a full project scan. Deliberately narrower than
+    # "did this fix introduce a NEW finding elsewhere" — that's what a normal
+    # `scryer` run (or `--baseline`) already answers; this only answers "does
+    # the one thing I just tried to fix still fire."
+    def run_verify(argv)
+      options = {}
+
+      parser = OptionParser.new do |opts|
+        opts.banner = "Usage: scryer verify --rule RULE_ID --file PATH [--path ROOT]"
+        opts.on("--rule RULE_ID", "The rule_id to re-check (required) — see `scryer verify --list-rules`.") { |v| options[:rule] = v }
+        opts.on("--file PATH", "File to re-scan (required) — relative to --path, or absolute.") { |v| options[:file] = v }
+        opts.on("--path ROOT", "Project root PATH is relative to (default: current directory).") { |v| options[:root] = v }
+        opts.on("--list-rules", "List every known rule_id and exit.") { options[:list_rules] = true }
+        opts.on("-h", "--help", "Show this help.") { options[:exit_early] = true; @stdout.puts opts }
+      end
+
+      begin
+        parser.parse!(argv)
+      rescue OptionParser::ParseError => e
+        raise UsageError, "#{e.message}\n#{parser}"
+      end
+      return 0 if options[:exit_early]
+
+      if options[:list_rules]
+        RuleSet.all.map(&:rule_id).sort.each { |id| @stdout.puts id }
+        return 0
+      end
+
+      raise UsageError, "scryer verify needs --rule RULE_ID and --file PATH\n#{parser}" unless options[:rule] && options[:file]
+
+      rule_class = RuleSet.all.find { |r| r.rule_id == options[:rule] }
+      unless rule_class
+        raise UsageError, "unknown rule_id #{options[:rule].inspect} — run `scryer verify --list-rules` to see valid ids."
+      end
+
+      root = File.expand_path(options[:root] || Dir.pwd)
+      abs_path = File.expand_path(options[:file], root)
+      raise UsageError, "no such file: #{abs_path}" unless File.file?(abs_path)
+
+      rel_path = abs_path.sub(/\A#{Regexp.escape(root)}\/?/, "")
+      source = File.read(abs_path)
+
+      sexp = begin
+        Ripper.sexp(source)
+      rescue StandardError => e
+        raise UsageError, "#{rel_path} failed to parse: #{e.message}"
+      end
+      if sexp.nil?
+        raise UsageError, "#{rel_path} could not be parsed (a syntax error, or Ruby syntax newer " \
+                           "than this gem's Ruby runtime supports)."
+      end
+
+      findings = rule_class.new(file: rel_path, source: source, sexp: sexp).scan
+
+      if findings.empty?
+        @stdout.puts "scryer verify: #{options[:rule]} no longer fires on #{rel_path} — fix verified."
+        0
+      else
+        @stdout.puts "scryer verify: #{options[:rule]} still fires on #{rel_path} (#{findings.size} finding(s)):"
+        findings.each { |f| @stdout.puts "  line #{f.line}: #{f.message}" }
+        1
+      end
+    end
+
     # One-off OSV.dev lookup for a single gem — no Gemfile.lock, no scan,
     # no other network calls. `spec` is "name" or "name:version" (colon
     # rather than a second CLI arg, so this stays a single -o-style flag).
@@ -182,6 +286,62 @@ module Scryer
 
       @stdout.puts "\nScryer: #{findings.size} advisory(-ies) found for #{label}."
       findings.empty? ? 0 : 1
+    end
+
+    # `--save-baseline PATH` is a distinct mode, same as --audit-deps/
+    # --check-gem: it captures every finding across every category (not
+    # just security — a legacy app's existing performance/style debt is
+    # just as much "not what I'm here to re-litigate today" as its security
+    # debt), writes the fingerprints, and exits without writing the normal
+    # -o reports. See Scryer::Baseline for why fingerprints, not file:line.
+    def save_baseline(path, result, dependency_findings)
+      all_findings = (result.security_findings + result.performance_findings + result.style_findings)
+                     .map(&:to_h) + dependency_findings.map(&:to_h)
+      Baseline.save(path, all_findings)
+      @stdout.puts "Scryer: saved baseline of #{all_findings.size} finding(s) to #{path}."
+      0
+    end
+
+    # Filters `result`'s finding arrays (mutated in place — Result is a
+    # plain Struct, this is the same object the caller already holds) and
+    # returns [new_dependency_findings, fixed_count] since dependency_findings
+    # is a local array in the caller, not a field this method can mutate by
+    # reference the way it can Struct fields.
+    # `fixed_count` has to be computed ONCE against the union of every
+    # category's current fingerprints, not once per category summed
+    # together — Baseline.diff's fixed_count is "baseline fingerprints not
+    # present in *this* call's findings," so calling it separately per
+    # category and summing would count every other category's
+    # still-present findings as "fixed" too (verified: this exact bug
+    # produced a nonsensical "762 fixed" on a rescan with zero changes,
+    # against a 255-finding baseline — fixed by computing fixed_count from
+    # the combined set once, while still filtering "new" per category since
+    # that part only checks baseline membership, which is fine to do
+    # separately).
+    def apply_baseline(path, result, dependency_findings)
+      baseline_fingerprints = Baseline.load(path)
+
+      security_hashes = result.security_findings.map(&:to_h)
+      performance_hashes = result.performance_findings.map(&:to_h)
+      style_hashes = result.style_findings.map(&:to_h)
+      dependency_hashes = dependency_findings.map(&:to_h)
+
+      all_current_fingerprints = Baseline.fingerprints(security_hashes + performance_hashes + style_hashes + dependency_hashes)
+      fixed_count = (baseline_fingerprints - all_current_fingerprints.to_set).size
+
+      result.security_findings = filter_new(result.security_findings, security_hashes, baseline_fingerprints)
+      result.performance_findings = filter_new(result.performance_findings, performance_hashes, baseline_fingerprints)
+      result.style_findings = filter_new(result.style_findings, style_hashes, baseline_fingerprints)
+      filtered_deps = filter_new(dependency_findings, dependency_hashes, baseline_fingerprints)
+
+      [filtered_deps, fixed_count]
+    rescue Baseline::LoadError => e
+      raise UsageError, e.message
+    end
+
+    def filter_new(objects, hashes, baseline_fingerprints)
+      fingerprints = Baseline.fingerprints(hashes)
+      objects.each_with_index.reject { |_, i| baseline_fingerprints.include?(fingerprints[i]) }.map(&:first)
     end
 
     def parse(argv)
@@ -204,6 +364,17 @@ module Scryer
                 "insecure git/http sources (offline), instead of running the normal static scan. " \
                 "Exits non-zero if anything is found, so this can gate CI the same way " \
                 "`bundle-audit check` does.") { options[:audit_deps] = true }
+        opts.on("--save-baseline PATH",
+                "Run the normal scan, save every finding's fingerprint to PATH, then exit — no " \
+                "reports written. A later `scryer --baseline PATH` scan reports only findings " \
+                "new since this snapshot, so an app with existing security debt can gate CI on " \
+                "new issues without being forced to fix everything on day one.") { |v| options[:save_baseline] = v }
+        opts.on("--baseline PATH",
+                "Compare this scan against a baseline saved by --save-baseline: every report " \
+                "(-o files, console summary, exit code) reflects only findings new since PATH " \
+                "was saved. Fingerprints ignore line number (rule + file + offending code), so " \
+                "an unrelated edit elsewhere in the file won't make an existing finding look " \
+                "new.") { |v| options[:baseline] = v }
         opts.on("--no-deps",
                 "Skip the dependency audit (OSV.dev vulnerable gems + insecure git/http sources) " \
                 "that otherwise runs as part of every normal scan. Use this for a fast, fully " \

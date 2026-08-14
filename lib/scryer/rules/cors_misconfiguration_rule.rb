@@ -27,6 +27,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "CORS wildcard origin combined with credentials"
+      self.cwe = "CWE-942"
+      self.owasp_category = "A05:2021-Security Misconfiguration"
+      self.confidence = "high"
 
       def scan
         findings = []

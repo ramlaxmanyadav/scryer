@@ -25,11 +25,20 @@ module Scryer
       # (client raises, times out, returns nothing usable) is swallowed and
       # the finding's original suggested_fix is left as-is — an LLM call
       # failing should never break a scan.
-      def enhance!(finding, client: Scryer.configuration.ai_client)
+      #
+      # `root`, when given (and only for a Scryer::Finding — see
+      # FixVerifier), triggers a follow-up verification pass: re-read the
+      # actual file from disk, substitute the AI's suggested replacement for
+      # the one offending line, and re-run just this finding's own rule
+      # against the result. Sets finding.fix_verified to true/false/nil (see
+      # Finding#fix_verified) — never raises, same failure-swallowing
+      # philosophy as the AI call itself.
+      def enhance!(finding, client: Scryer.configuration.ai_client, root: nil)
         return finding unless client
 
         reply = call_client(client, prompt_for(finding))
         finding.suggested_fix = reply.strip unless blank?(reply)
+        finding.fix_verified = FixVerifier.verify(finding: finding, root: root) if root
         finding
       rescue StandardError
         finding
@@ -40,10 +49,14 @@ module Scryer
       # (network-bound work, same pattern as
       # DependencyAudit.vulnerable_gems) so a large finding count doesn't
       # mean one-request-at-a-time. No-op if no client is configured —
-      # callers don't need to check first.
-      def enhance_result!(result, client: Scryer.configuration.ai_client, concurrency: 4)
+      # callers don't need to check first. Pass `root` (the project root
+      # `finding.file` is relative to) to also run fix verification — see
+      # `enhance!`; omit it to skip verification entirely (e.g. when the
+      # caller has no meaningful root, or doesn't want the extra re-parse
+      # work).
+      def enhance_result!(result, client: Scryer.configuration.ai_client, concurrency: 4, root: nil)
         enhance_many!(result.security_findings + result.performance_findings + result.style_findings,
-                      client: client, concurrency: concurrency)
+                      client: client, concurrency: concurrency, root: root)
         result
       end
 
@@ -51,8 +64,9 @@ module Scryer
       # Scryer::DependencyAudit::Finding objects, which aren't attached to a
       # Scanner::Result. Works on any mix of Finding/DependencyAudit::Finding
       # (prompt_for below dispatches on which one it got). No-op if no client
-      # is configured.
-      def enhance_many!(findings, client: Scryer.configuration.ai_client, concurrency: 4)
+      # is configured. `root` is ignored for DependencyAudit::Finding objects
+      # (FixVerifier only handles rule-backed Finding — see its guard clause).
+      def enhance_many!(findings, client: Scryer.configuration.ai_client, concurrency: 4, root: nil)
         return findings unless client
 
         queue = Queue.new
@@ -68,7 +82,7 @@ module Scryer
               end
               break unless finding
 
-              enhance!(finding, client: client)
+              enhance!(finding, client: client, root: root)
             end
           end
         end
@@ -107,8 +121,14 @@ module Scryer
 
           Generic guidance for this rule: #{finding.suggested_fix}
 
-          Reply with a short explanation (1-3 sentences) followed by a before/after code
-          example using the actual snippet above. Do not restate the issue description.
+          Reply with a short explanation (1-3 sentences), then a fenced code block showing the
+          fix in context if that's useful, and finally — as the very last thing in your reply,
+          exactly once — a line reading "AFTER:" followed by a fenced code block containing ONLY
+          the corrected replacement for the single offending line shown above (line
+          #{finding.line}), nothing else in that block (no surrounding context lines, no
+          comments about the change). This exact "AFTER:" block is parsed automatically to
+          verify the fix actually resolves the finding, so it must be a valid, direct drop-in
+          replacement for that one line. Do not restate the issue description.
         PROMPT
       end
 

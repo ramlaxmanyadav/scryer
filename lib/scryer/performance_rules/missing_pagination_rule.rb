@@ -12,6 +12,7 @@ module Scryer
       self.category = "performance"
       self.default_severity = "warning"
       self.title = "Possible unbounded result set on an index action"
+      self.confidence = "medium"
 
       QUERY_METHODS = %w[all where].freeze
       BOUND_METHODS = %w[limit page per paginate find_each find_in_batches first take].freeze

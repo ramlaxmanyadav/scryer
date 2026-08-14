@@ -21,6 +21,7 @@ module Scryer
       self.category = "performance"
       self.default_severity = "warning"
       self.title = "Possible N+1 query inside a loop"
+      self.confidence = "medium"
 
       QUERY_METHODS = %w[where all find find_by find_by! order limit].freeze
       LOOP_METHODS = %w[each map collect each_with_index].freeze

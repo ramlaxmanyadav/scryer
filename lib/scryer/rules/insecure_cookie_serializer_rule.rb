@@ -12,6 +12,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Marshal cookie serializer enabled"
+      self.cwe = "CWE-502"
+      self.owasp_category = "A08:2021-Software and Data Integrity Failures"
+      self.confidence = "high"
 
       def scan
         findings = []

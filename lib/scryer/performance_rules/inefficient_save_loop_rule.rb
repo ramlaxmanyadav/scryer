@@ -14,6 +14,7 @@ module Scryer
       self.category = "performance"
       self.default_severity = "warning"
       self.title = "Per-record save/update inside a loop"
+      self.confidence = "medium"
 
       LOOP_METHODS = %w[each each_with_index].freeze
       # Genuinely argless in normal use — a bare `:call` node, never wrapped

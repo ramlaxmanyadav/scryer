@@ -14,6 +14,21 @@ Scryer.configure do |c|
   # where checkouts often land in detached-HEAD state). Leave blank to use
   # the actual checked-out branch:
   # c.branch = ENV["CI_COMMIT_BRANCH"]
+
+  # Silence a specific rule by rule_id (repeatable) — a known false positive
+  # on this codebase, or a check that doesn't apply here. Prefer this over
+  # deleting/editing the rule itself; run `bin/rails scryer:report` once and
+  # check tmp/scryer_report.html's "Checks performed" section for the full
+  # list of rule_ids:
+  # c.skip_rules = %w[idor]
+
+  # Any object/Proc responding to #call(prompt) (or #complete(prompt)) that
+  # returns a String — opts into rewriting every finding's suggested_fix
+  # against its actual code via that LLM. Off by default: no network calls,
+  # no provider assumed. See the README's "AI-assisted fix suggestions" and
+  # "AI-verified remediation" sections for what this does and how the
+  # (optional) re-scan-to-confirm-the-fix-works verification works:
+  # c.ai_client = ->(prompt) { MyLlmClient.complete(prompt) }
 end
 
 # Runtime query watcher (N+1 / unused eager loading — see README's "Runtime

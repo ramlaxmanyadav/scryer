@@ -42,6 +42,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "GraphQL schema without query depth/complexity limits"
+      self.cwe = "CWE-770"
+      self.owasp_category = "A04:2021-Insecure Design"
+      self.confidence = "medium"
 
       LIMIT_METHODS = %w[max_depth max_complexity].freeze
 

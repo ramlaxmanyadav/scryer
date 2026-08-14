@@ -12,6 +12,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "CSRF protection skipped without safeguards"
+      self.cwe = "CWE-352"
+      self.owasp_category = "A01:2021-Broken Access Control"
+      self.confidence = "medium"
 
       def scan
         findings = []
@@ -19,7 +22,7 @@ module Scryer
         Ast.each_node(sexp) do |node|
           next unless Ast.tagged?(node, :class)
 
-          class_name = Ast.ident_text(node[1].is_a?(Array) ? node[1][1] : nil)
+          class_name = Ast.class_name(node[1])
           next unless class_name.to_s.end_with?("Controller")
 
           body = node[3]

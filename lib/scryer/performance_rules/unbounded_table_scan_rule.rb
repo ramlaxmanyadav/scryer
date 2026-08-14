@@ -14,6 +14,7 @@ module Scryer
       self.category = "performance"
       self.default_severity = "warning"
       self.title = "Full query result loaded into memory before iterating"
+      self.confidence = "medium"
 
       QUERY_METHODS = %w[all where order].freeze
 

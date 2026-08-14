@@ -9,6 +9,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Hardcoded credential or API key"
+      self.cwe = "CWE-798"
+      self.owasp_category = "A07:2021-Identification and Authentication Failures"
+      self.confidence = "medium"
 
       NAME_PATTERN = /(api[_-]?key|secret|token|password|passwd|access[_-]?key|private[_-]?key|auth)/i.freeze
 

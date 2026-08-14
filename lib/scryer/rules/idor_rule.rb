@@ -21,6 +21,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Possible insecure direct object reference (IDOR)"
+      self.cwe = "CWE-639"
+      self.owasp_category = "A01:2021-Broken Access Control"
+      self.confidence = "low"
 
       FINDER_METHODS = %w[find find_by find_by!].freeze
 
@@ -64,7 +67,7 @@ module Scryer
         Ast.each_node(sexp) do |node|
           next unless Ast.tagged?(node, :class)
 
-          class_name = Ast.ident_text(node[1].is_a?(Array) ? node[1][1] : nil)
+          class_name = Ast.class_name(node[1])
           next unless class_name.to_s.end_with?("Controller")
 
           body = node[3]
@@ -129,14 +132,33 @@ module Scryer
         end
       end
 
+      # A namespaced model (`Admin::Post.find(...)`, `Api::V1::User.find(...)`
+      # — a common real-world pattern for admin-scoped or API-versioned
+      # resources) parses as `:const_path_ref`, not `:var_ref` — verified via
+      # `Ripper.sexp("Admin::Post.find(params[:id])")`. The original version
+      # of this check only handled bare `:var_ref` receivers, so a
+      # namespaced model's `.find(params[...])` was silently never examined
+      # at all (a false negative, not a false positive — worth fixing since
+      # namespacing under a module is an extremely common Rails convention).
+      # Checked against the *last* segment (`"Post"`, not `"Admin"`), same
+      # exclusion list either way — none of NON_MODEL_RECEIVERS are commonly
+      # used in namespaced form for this purpose, but checking the actual
+      # class name being looked up is the more correct match regardless.
       def likely_model_receiver?(receiver)
         return false if receiver.nil? # bare find(...) inside the model itself, not a controller lookup
-        return false unless Ast.tagged?(receiver, :var_ref)
 
-        const_node = receiver[1]
-        return false unless const_node.is_a?(Array) && const_node[0] == :@const
+        const_name = const_receiver_name(receiver)
+        return false unless const_name
 
-        !NON_MODEL_RECEIVERS.include?(const_node[1])
+        !NON_MODEL_RECEIVERS.include?(const_name)
+      end
+
+      def const_receiver_name(node)
+        if Ast.tagged?(node, :var_ref) && node[1].is_a?(Array) && node[1][0] == :@const
+          node[1][1]
+        elsif Ast.tagged?(node, :const_path_ref) && node[2].is_a?(Array) && node[2][0] == :@const
+          node[2][1]
+        end
       end
     end
   end

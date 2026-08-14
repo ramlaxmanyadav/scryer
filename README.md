@@ -24,29 +24,44 @@ scryer
 Scryer Audit — 236 files scanned
 ────────────────────────────────
 
-Security               12 findings
+Security Score: 10/100 (F)
+Checks: 23/36 rules clean (63.9%)
+
+Security               27 findings
 Performance            10 findings
 Code Quality          248 findings
 Dependencies           24 findings
 ────────────────────────────────
-Total                 294 findings
+Total                 309 findings
 
 Top priorities:
-  1. [critical] security — mass_assignment (app/helpers/api/v1/create_charge_helper.rb:45)
-  2. [critical] security — mass_assignment (app/helpers/api/v1/terminal/terminal_helper.rb:92)
-  3. [critical] security — mass_assignment (app/controllers/api/v1/payouts_controller.rb:8)
-  4. [critical] security — sql_injection (app/controllers/concerns/payment_method_helper.rb:12)
-  5. [critical] security — sql_injection (app/controllers/concerns/payment_method_helper.rb:21)
+  1. [critical] security — mass_assignment (app/helpers/api/v1/create_order_helper.rb:14)
+  2. [critical] security — mass_assignment (app/helpers/api/v1/create_order_helper.rb:45)
+  3. [critical] security — mass_assignment (app/helpers/api/v1/checkout/checkout_helper.rb:92)
+  4. [critical] security — sql_injection (app/controllers/concerns/billing_helper.rb:12)
+  5. [critical] security — mass_assignment (app/controllers/api/v1/orders_controller.rb:8)
+
+OWASP Top 10 (2021) coverage:
+  A01:2021-Broken Access Control: 16 findings
+  A03:2021-Injection: 4 findings
+  A08:2021-Software and Data Integrity Failures: 4 findings
+  A02:2021-Cryptographic Failures: 1 finding
+  A04:2021-Insecure Design: 1 finding
+  A09:2021-Security Logging and Monitoring Failures: 1 finding
 
 JSON report: tmp/scryer_report.json
 HTML report: tmp/scryer_report.html
 ```
 
-That's real output from a scan of a live 236-file Rails app — not a mockup. "Top priorities" is
-the same severity ranking [`ReportRenderer#top_risks`](lib/scryer/report_renderer.rb) applies
-across *all* categories — security, dependencies, performance, code quality — not just within
-each one; in the HTML report it's at the top of the Findings section, ahead of the 294 individual
-findings underneath it. See
+That's real output from a scan of a live 236-file Rails app (an internal production codebase we
+call "acme-app" here — file/controller names above are anonymized, since we don't publish that
+app's source; the finding counts, severities, rule IDs, and line numbers are exactly as scanned,
+unedited) — not a mockup, and the harsh grade is real too (see
+[Security score](#security-score) for what it does and doesn't mean). "Top priorities" is the same
+severity ranking [`ReportRenderer#top_risks`](lib/scryer/report_renderer.rb) applies across *all*
+categories — security, dependencies, performance, code quality — not just within each one; in the
+HTML report it's at the top of the Findings section, ahead of the 309 individual findings
+underneath it. See
 [Scryer vs RuboCop vs Brakeman vs bundler-audit](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit)
 below for exactly how this differs from what those tools do.
 
@@ -66,8 +81,15 @@ below for exactly how this differs from what those tools do.
 * Server-side request forgery (SSRF)
 * Path traversal
 * Insecure direct object references (IDOR) — the least precise check in the gem; see
-  [comparison table](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit) for the false-positive tradeoff
-* Authentication filters explicitly skipped (`skip_before_action`)
+  [comparison table](#scryer-vs-rubocop-vs-brakeman-vs-bundler-audit) for the false-positive tradeoff.
+  Correctly examines namespaced controllers too (`Admin::PostsController`,
+  `Api::V1::UsersController`) — an earlier version silently skipped any namespaced class here
+* A `create`/`update`/`destroy` action with no authorization check anywhere in its controller
+  (broader than IDOR — catches write actions that don't call `.find` at all)
+* A Pundit-using controller's `index` action querying a model directly instead of through
+  `policy_scope` (the common "remembered `authorize`, forgot `policy_scope`" gotcha)
+* Authentication filters explicitly skipped (`skip_before_action`) — also correctly examines
+  namespaced controllers, same fix as IDOR above
 * Rails security configuration: disabled HTTPS enforcement, session cookies missing the secure
   flag, the Marshal cookie serializer, disabled default security headers (`X-Frame-Options`,
   `X-Content-Type-Options`, Content-Security-Policy), Action Cable request forgery protection
@@ -79,6 +101,32 @@ below for exactly how this differs from what those tools do.
 * Background jobs (`perform_async`/`perform_later`/`perform_now`) passed raw `params` — risks
   leaking request data into Sidekiq/ActiveJob logs, Redis, or the Sidekiq web UI
 * GraphQL schemas with no query depth/complexity limit (`max_depth`/`max_complexity`)
+* Rails config audit: `config.consider_all_requests_local = true` left on in
+  `config/environments/production.rb` (shows full debug error pages — backtrace, local variables,
+  request params — to anyone who triggers an exception), `config.log_level = :debug` in production
+  (logs full request params and SQL bind values), `config.hosts.clear` (disables the Host-header
+  allowlist that protects against DNS-rebinding/Host-header-injection). All three are Rails
+  defaults in development/test where they're completely normal — only flagged where they're
+  actually risky.
+
+Every security finding also carries a **CWE ID**, an **OWASP Top 10 (2021) category**, and a
+**confidence level** (`high`/`medium`/`low`) — all three appear in every report format (JSON, CSV,
+HTML, SARIF) and in the OWASP Top 10 coverage scorecard (console summary + a dedicated HTML
+section). Two things worth being precise about:
+
+- **Confidence is a different axis from severity.** Severity is "how bad is this if real";
+  confidence is "how often does this specific rule's pattern-match actually reflect a real issue."
+  `idor` is a good example of the split: a real IDOR is serious (`warning` severity, arguably
+  understating it), but the rule's own heuristic — no visible authorization call anywhere in the
+  controller class — is the least precise in the gem, so it's tagged `low` confidence. Most rules
+  are `medium`; the narrowest, most literal-match rules (a hardcoded string literal, an explicit
+  `= false` config assignment) are `high`.
+- **The CWE/OWASP mapping is Scryer's own best-effort categorization**, chosen for practitioner
+  convenience (a quick answer to "does our tooling cover OWASP category X" in a compliance
+  conversation) — it is not an OWASP-endorsed mapping and hasn't been independently audited. A
+  handful of the 31 assignments involved a real judgment call where a rule's issue doesn't map
+  cleanly onto exactly one OWASP category (e.g. `job_raw_params`, which is as much a data-exposure
+  concern as a logging one). Treat it as a useful pointer, not a certification.
 
 **Code quality**
 
@@ -101,6 +149,14 @@ below for exactly how this differs from what those tools do.
 * Insecure gem sources
 * Ruby version end-of-life (no more security patches published for it, for any issue)
 * `config/master.key` present on disk with no matching `.gitignore` entry
+
+**Runtime** (opt-in, needs a running app — see [Runtime query watcher](#runtime-query-watcher) and
+[Runtime authorization watcher](#runtime-authorization-watcher))
+
+* N+1 queries and unused eager loading, as they actually happen
+* A write action that completed with no Pundit/CanCanCan authorization check actually invoked
+  during that request — a live, false-positive-resistant companion to the static `idor`/
+  `missing_authorization`/`missing_policy_scope` rules above
 
 ### Example findings
 
@@ -164,6 +220,15 @@ Generate detailed JSON or self-contained HTML reports:
 scryer -o report.json -o report.html
 ```
 
+The HTML report leads with a [security score](#security-score) badge and a severity distribution
+chart, then Overview/Summary/OWASP coverage, collapsed-by-default reference tables (every rule
+that *can* fire, not a wall of always-expanded detail), and the Findings section itself — Top
+priorities first, then a text filter box (rule/file/message, no page reload) above the full
+severity-grouped, accordion-collapsed list. Each finding also shows its CWE ID, OWASP category, and
+confidence level as small tags; clicking a count in the OWASP coverage table jumps to Findings with
+that exact category pre-filled into the search box, so "how many `A01` findings are there" and
+"which ones, specifically" are one click apart instead of two different views.
+
 ### Developer-friendly suggestions
 
 Every finding includes a human-reviewable suggested fix. Scryer never automatically modifies your source code.
@@ -210,6 +275,93 @@ normal for this class of tool, not a bug. An already-guarded call can still get 
 rules don't trace surrounding conditionals — always review a finding in its surrounding context
 before acting on it.
 
+## Security score
+
+Every scan produces a single 0-100 score plus a letter grade (A-F), shown in the console summary
+and as a badge at the very top of the HTML report:
+
+```
+Security Score: 11/100 (F)
+```
+
+The formula (`ReportRenderer#security_score` in `lib/scryer/report_renderer.rb`): every security
+and dependency finding costs points, weighted by both its severity *and* its confidence (a
+`low`-confidence `idor` finding costs less than a `high`-confidence `sql_injection` finding at the
+same severity), combined via exponential decay from 100 rather than linear subtraction — one
+critical finding visibly moves the score (100 → ~86) without a handful of findings driving any
+real app straight to a hard-clamped 0.
+
+Two things worth being precise about before you treat this number as meaningful:
+
+- **It's not normalized by app size.** A 10-file app and a 1,000-file app with the same finding
+  *density* will score very differently here — this score reflects a scan's absolute finding
+  exposure, not a rate. That makes it useful for tracking *one project's own trend* over time (did
+  the next scan score higher or lower), not for comparing two differently-sized codebases against
+  each other.
+- **Performance and code-quality findings aren't part of it.** This is a *security* score — only
+  security and dependency findings count. A slow app with clean security findings still scores
+  well here; check the "Performance"/"Code Quality" rows in the summary box separately for that.
+
+Alongside the score, every scan also reports a **rule-level pass rate** — "how many of Scryer's
+registered checks fired zero findings":
+
+```
+Checks: 23/36 rules clean (63.9%)
+```
+
+This is the closest thing Scryer has to Brakeman's "X checks, Y warnings" framing — a coverage
+signal, not a risk signal. It's deliberately a *different* number from the security score, and the
+two won't always agree: a codebase can have a high clean rate (few distinct rules ever fire) and
+still a low score (the few that did fire were severe and high-confidence), or the reverse (many
+different rules each firing once, none of them serious). `ReportRenderer#rules_clean_rate` computes
+it from `Scryer::RuleSet.all` (every registered security/performance/style rule) against which
+rule_ids actually appeared in this scan's findings — dependency checks aren't counted here since
+they're not backed by a `Scryer::Rule` subclass. Report both; neither alone tells the whole story.
+
+The 10/F above is a real score from the acme-app example, not a cherry-picked good result — see
+[A note on how this gem was actually verified](#a-note-on-how-this-gem-was-actually-verified) for
+why every example in this README is real output.
+
+## Accuracy benchmark
+
+Every rule in this gem is heuristic pattern-matching — stated throughout this README, but until now
+never backed by a measured number, just "expect some false positives, that's normal for this class
+of tool." [`benchmark/`](benchmark/) turns that into an actual precision/recall benchmark: a
+hand-labeled corpus of small Ruby/Rails snippets per rule (`benchmark/corpus.rb`), each marked
+`vulnerable` (should fire) or `safe` (should NOT fire — including deliberately close "near miss"
+samples that resemble the vulnerable shape, not just obviously unrelated code), run through the
+real `Scryer::Rule#scan` — the same code path an actual scan uses, not a simulation.
+
+```bash
+rake benchmark          # or: ruby benchmark/run.rb
+```
+
+Current numbers, across all 36 registered rules and 180 labeled samples:
+
+| | TP | FN | FP | TN | Precision | Recall | F1 |
+|---|---|---|---|---|---|---|---|
+| **All 36 rules** | 82 | 3 | 1 | 94 | **98.8%** | **96.5%** | **97.6%** |
+
+Two rules score below 100% — both are gaps this gem already disclosed in the rule's own top comment
+before this benchmark existed, now actually measured instead of just asserted:
+
+- **`graphql_missing_query_limits`** (50% precision, 50% recall on its 4 samples): misses a schema
+  that gets its query limits through a shared custom base class or an `include`d module — both
+  require cross-file resolution this per-file rule doesn't attempt.
+- **`unbounded_table_scan`** (recall 66.7%): misses an unbounded scan once the query is assigned to
+  a variable before `.each` instead of chained directly (`orders = Order.where(...); orders.each`).
+- **`mass_assignment`** (recall 66.7%): the one gap this benchmark actually *found*, not just
+  measured — see the CHANGELOG entry on the ivar-receiver fix. The corpus's other documented
+  false-negative sample for this rule (a namespaced `Admin::Order.create(...)` receiver) is still
+  an open, disclosed gap.
+
+**Read `benchmark/README.md` before quoting any of these numbers** — this is a corpus we wrote
+ourselves specifically to stress-test our own rules, not an independent third-party benchmark (the
+way, say, the OWASP Benchmark project is for Java tools), and not real production code the way the
+acme-app numbers used throughout this README are. Treat it as a lower bound on rigor (something
+concrete was actually measured) and an upper bound on confidence (real-world false-positive/
+false-negative rates on *your* codebase, with its own idioms and libraries, can and will differ).
+
 ## Scryer vs RuboCop vs Brakeman vs bundler-audit
 
 Brakeman is the deeper, more mature tool for the security categories it's spent years on — real
@@ -235,6 +387,12 @@ sits alongside them and adds the cross-category picture neither one (nor bundler
 | SARIF report (GitHub Code Scanning, etc.)  | ✅     | ❌       | ✅       | ❌            |
 | Human-reviewable fix suggestions           | ✅     | Partial [e] | Partial [f] | Limited [g] |
 | Cross-category risk ranking ("fix this first") | ✅ [j] | ❌  | ❌      | ❌            |
+| CWE / OWASP Top 10 category tags           | ✅ [k] | ❌       | ✅ [k]   | ❌            |
+| Confidence level per finding                | ✅     | ❌       | ✅       | ❌            |
+| Official GitHub Action                     | ✅ [l] | ❌       | ❌       | ❌            |
+| Baseline / new-vs-existing-findings diffing | ✅ [m] | ❌       | Partial [m] | ❌         |
+| Overall security score                     | ✅     | ❌       | ❌       | ❌            |
+| Fix verified against an actual re-scan     | ✅ [n] | ❌       | ❌       | ❌            |
 | Single command covering all of the above   | ✅     | ❌       | ❌       | ❌            |
 
 - **[a]** `rubocop-performance` adds some Ruby/Rails performance cops, but nothing like N+1-query
@@ -265,6 +423,26 @@ sits alongside them and adds the cross-category picture neither one (nor bundler
   answer. `ReportRenderer#top_risks` sorts every severity-bearing finding from a scan (across all
   four categories) by severity, shown as "Top priorities" in the console summary and at the top of
   the HTML report — see the example near the top of this README.
+- **[k]** Not a Scryer-only capability — Brakeman's own warnings already include a CWE reference.
+  Scryer's version is a fuller mapping (every one of its 31 security rules carries both a CWE ID
+  and an OWASP Top 10 (2021) category, aggregated into an OWASP coverage scorecard in every
+  report), but the underlying idea isn't new; see
+  [What Scryer detects](#what-scryer-detects) for the honesty caveat on how this mapping was built
+  (Scryer's own best-effort categorization, not OWASP-audited).
+- **[l]** [`action.yml`](action.yml) in this repo — `uses: ramlaxmanyadav/scryer@<version>` runs
+  the scan and uploads SARIF to GitHub Code Scanning in one step, instead of hand-writing the
+  workflow YAML in [CI/CD integration](#cicd-integration) yourself (that manual version still
+  works and is documented there too, for anyone who wants full control over the steps).
+- **[m]** Brakeman has an ignore file (`brakeman -I`) that permanently silences specific warnings
+  by fingerprint — genuinely similar in mechanism to [Baseline mode](#baseline-mode)'s
+  fingerprinting, marked Partial rather than ✅ here because it's a permanent suppression list you
+  maintain by hand, not an explicit "show me only what's new since this snapshot, and tell me
+  what got fixed" diff against a saved baseline the way `scryer --baseline` reports both.
+- **[n]** `scryer verify --rule RULE_ID --file PATH` re-runs one rule against one file to confirm a
+  fix actually cleared it, and — when an `ai_client` is configured — the same check runs
+  automatically on every AI-rewritten `suggested_fix` before the report is written (see
+  [Verifying a fix](#verifying-a-fix)). RuboCop's `-A` rewrites code directly rather than verifying
+  a *suggested* fix; Brakeman and bundler-audit don't rewrite or re-check at all.
 
 Brakeman's security analysis and RuboCop's style checks are still worth running on their own —
 Scryer doesn't try to replace either, and running it alongside them costs nothing (different tools,
@@ -364,7 +542,43 @@ security, performance, and style findings (each mapped from `Scryer::Rule.rule_i
 dependency findings (mapped from `kind`, located at `Gemfile.lock`) — so nothing behaves any
 differently than it does in HTML/JSON/CSV.
 
-Upload it with GitHub's own action in a workflow:
+### Option A: the bundled `action.yml`
+
+[`action.yml`](action.yml) in this repo wraps the whole thing — install, scan, SARIF upload, and
+correctly ordering all three so the upload still happens even when findings were reported (see the
+`continue-on-error` explanation below for why that ordering matters):
+
+```yaml
+# .github/workflows/scryer.yml
+name: Scryer
+on: [push, pull_request]
+
+jobs:
+  scryer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required to upload SARIF
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ramlaxmanyadav/scryer@v1.1.0
+        with:
+          ruby-version: "3.3"
+```
+
+All inputs are optional — `path` (default `.`), `scryer-version` (default: latest), `extra-args`
+(e.g. `--skip idor --no-deps`), `fail-on-findings` (default `true`), `upload-sarif` (default
+`true`). Outputs: `sarif-path`, `json-path`, `exit-code`. See [action.yml](action.yml) for the full
+input/output reference.
+
+`@v1.1.0` above needs a matching git tag pushed to GitHub before `uses:` can resolve it — replace
+it with whatever version tag you actually push (or `@main` to always track the latest commit,
+accepting that it can change under you).
+
+### Option B: hand-written steps
+
+For full control over the individual steps (a different Ruby setup, extra caching, a different
+job structure):
 
 ```yaml
 # .github/workflows/scryer.yml
@@ -394,7 +608,50 @@ jobs:
 (see [Running a scan](#running-a-scan)), which would otherwise skip the upload step entirely on
 the run where you most want to see the results. If you want the job to still fail the build overall
 on findings, check `scryer`'s own exit code in a separate step, or drop `continue-on-error` and
-accept that the SARIF upload only happens on clean runs.
+accept that the SARIF upload only happens on clean runs. `action.yml` (Option A) handles this
+ordering for you automatically.
+
+### Rails apps: `bin/rails scryer:ci`
+
+Inside a Rails app (rather than the standalone `scryer` executable above), `scryer:ci` is a
+memorable shortcut for the same CI-sensible defaults — JSON + SARIF under `tmp/`, dependency audit
+on, same `SCRYER_BASELINE` support and same fail-the-build-on-findings behavior as `scryer:report`
+— without needing to remember the bracket-arg syntax:
+
+```bash
+bin/rails scryer:ci   # same as bin/rails 'scryer:report[json,sarif]'
+```
+
+## Verifying a fix
+
+Two ways to confirm a specific finding is actually resolved, without waiting on (or paying for) a
+full rescan:
+
+**`scryer verify`** re-parses one file and re-runs one rule against it — meant to run right after
+applying a fix by hand (or reviewing an AI-suggested one):
+
+```bash
+scryer verify --rule sql_injection --file app/models/user.rb
+# scryer verify: sql_injection no longer fires on app/models/user.rb — fix verified.   (exit 0)
+# or: scryer verify: sql_injection still fires on app/models/user.rb (1 finding(s)):   (exit 1)
+#       line 12: `where` is called with a string built via interpolation, ...
+```
+
+`--path ROOT` sets the project root `--file` is resolved against (default: current directory);
+`--list-rules` prints every known `rule_id`. Deliberately narrow: this only answers "does the one
+thing I targeted still fire," not "did this change introduce a different finding elsewhere" — a
+normal `scryer` run (or `--baseline`) already answers that.
+
+**AI-verified remediation** does the same check automatically when an `ai_client` is configured
+(see [AI-assisted fix suggestions](#ai-assisted-fix-suggestions)) — every AI-rewritten
+`suggested_fix` is re-scanned against an in-memory copy of the real file before the report is
+written, and each finding gets a `fix_verified: true/false/nil` field (`true`: the rule no longer
+fires with this fix applied; `false`: it was checked and still fires, or the rewritten line doesn't
+even parse; `nil`: not attempted at all — no `ai_client` configured, or the AI's reply didn't
+include a usable code block). The HTML report shows this as a green "AI fix verified" or red "AI
+fix NOT verified" line under each finding's suggested fix. Nothing is ever written back to the real
+file for this check — same "never auto-applied" rule as `suggested_fix` itself; this only confirms
+whether the *suggestion* would work if you applied it.
 
 ## What gets scanned
 
@@ -437,6 +694,41 @@ without touching the initializer — useful for a one-off "does this go away wit
 ```bash
 scryer --skip mass_assignment --skip weak_crypto
 ```
+
+## Baseline mode
+
+`--skip` silences a rule everywhere, permanently. Baseline mode is for the more common real-world
+situation: an existing app has genuine pre-existing findings you're not going to fix today, but you
+still want CI to fail on anything *new* from here on:
+
+```bash
+# Once: snapshot the current state
+scryer --save-baseline tmp/scryer_baseline.json
+
+# Every run after that: only new findings show up, count toward the exit code,
+# and appear in -o reports — everything already in the baseline is suppressed
+scryer --baseline tmp/scryer_baseline.json -o scryer.sarif
+```
+
+```
+Baseline: tmp/scryer_baseline.json — showing new findings only (2 fixed since baseline).
+
+Security Score: 96/100 (A)
+
+Security                 1 finding
+...
+```
+
+Findings are matched by a **fingerprint** (`rule_id` + file + the offending source text), not
+file:line — an unrelated edit earlier in the same file shifting every following line number
+wouldn't otherwise make an existing finding look simultaneously "new" and "fixed" on every commit.
+"Fixed since baseline" counts findings that were in the baseline but aren't in this scan anymore
+(across every category — security, performance, style, dependencies); duplicate-code groups aren't
+part of baseline mode (they don't fit the same fingerprint shape) and always show in full.
+
+Rails/rake equivalents: `rails 'scryer:save_baseline[tmp/scryer_baseline.json]'` to save, and
+`SCRYER_BASELINE=tmp/scryer_baseline.json rails scryer:report` to compare (an env var, since rake's
+bracket-arg parsing is already stretched thin between format tokens, `nodeps`, and an output path).
 
 ## Runtime query watcher
 
@@ -481,6 +773,50 @@ into your own logging/alerting instead of (or alongside) the built-in logger cal
 This is genuinely runtime-only: with no queries running, it finds nothing, and it never appears in
 the static `tmp/scryer_report.html` output. Think of it as this gem's answer to "what actually
 happened during this request", where the rest of Scryer answers "what does this code look like".
+
+## Runtime authorization watcher
+
+The static `idor`/`missing_authorization`/`missing_policy_scope` rules can only ever say "no call
+to a known authorization method is visible anywhere in this controller's source" — which is exactly
+as wrong as it sounds whenever the real check happens somewhere the static AST walk can't see (a
+shared base controller, a concern, a class-level macro). `Scryer::AuthorizationWatcher` answers a
+narrower but far more reliable question instead: for *this actual request*, did Pundit's
+`authorize`/`policy_scope` or CanCanCan's `authorize!` genuinely get called? Both libraries already
+track this themselves internally (for their own `verify_authorized`/`check_authorization` helpers)
+— this watcher registers one more `after_action` alongside those and checks the same flags
+(`Pundit::Authorization#pundit_policy_authorized?`/`#pundit_policy_scoped?`, CanCanCan's
+`@_authorized` ivar — verified by reading both gems' actual source, not guessed).
+
+```ruby
+# config/initializers/scryer.rb
+require "scryer/authorization_watcher"
+Scryer::AuthorizationWatcher.enable!
+```
+
+No middleware to install and no per-request scope to open (unlike `QueryWatcher` above) — a Rails
+controller instance is already fresh per request, so the `after_action` above is all `enable!`
+needs. It flags a `create`/`update`/`destroy` action (or any `POST`/`PUT`/`PATCH`/`DELETE` request)
+that completed successfully (status < 400) with neither flag set:
+
+```ruby
+Scryer::AuthorizationWatcher.findings
+# => [#<struct Scryer::AuthorizationWatcher::Finding kind="runtime_missing_authorization",
+#      message="WidgetsController#update completed a PATCH request (status 200) with no
+#      authorization check actually invoked during it ...", controller="WidgetsController",
+#      action="update", method="PATCH", path="/widgets/1", suggested_fix="...">]
+```
+
+Two honesty points worth being precise about:
+
+- **Pundit/CanCanCan-only, same scope as the static rules it complements.** With neither gem
+  loaded, `enable!` still runs, but every request is silently skipped — an app with fully custom,
+  non-object-level authorization (a single `before_action :require_admin!`) gets no findings and no
+  false-positive flood, rather than being flagged for a pattern this watcher has no way to
+  recognize as intentional.
+- **Write actions only.** Read-scoping gaps (an unscoped `index` — see the static
+  `missing_policy_scope` rule) aren't covered here: verifying "was the returned data correctly
+  scoped" at runtime, rather than "was a method called," is a materially different and harder check
+  this class doesn't attempt.
 
 ## Dependency audit
 
@@ -652,6 +988,12 @@ Scryer::AiFixSuggester.enhance!(finding)          # one Finding, in place
 Scryer::AiFixSuggester.enhance_result!(result)    # every finding on a Scanner::Result, in place
 ```
 
+Both `bin/rails scryer:report` and the `scryer` executable also pass `root:` so each rewritten fix
+gets verified against a re-scan automatically (`finding.fix_verified` — see
+[Verifying a fix](#verifying-a-fix) for what that means and how to trigger it manually with
+`scryer verify`); calling `enhance!`/`enhance_result!` directly as shown above skips verification
+unless you pass `root:` yourself.
+
 **This sends code snippets to whatever endpoint you configure.** `code_snippet`, `message`, and the
 file path are included in the prompt — the same privacy consideration as any third-party service:
 don't point this at an endpoint you don't trust with your source, and be mindful this is a second
@@ -671,11 +1013,60 @@ in a host app for the full description (also in
   not you ever run this generator. The generator exists purely to give you an editable config file.
 - **Settings it exposes**: `c.project_name` (report header label), `c.dirs` (which top-level
   directories get scanned), `c.branch` (override the git branch label — see
-  [Branch reporting](#branch-reporting)). All are optional; the commented-out initializer works
-  as-is with just `bundle install` + the generator.
+  [Branch reporting](#branch-reporting)), `c.skip_rules` (silence specific rule_ids — see
+  [Skipping rules](#skipping-rules)), `c.ai_client` (see
+  [AI-assisted fix suggestions](#ai-assisted-fix-suggestions)). All are optional; the
+  commented-out initializer works as-is with just `bundle install` + the generator.
 - **Re-running it**: standard Thor/Rails::Generators behavior — if
   `config/initializers/scryer.rb` already exists, you'll be prompted to overwrite, skip, or diff
   rather than have it silently clobbered.
+
+## Testing Scryer results in your own test suite
+
+Two opt-in files turn "this app's own scan stays clean" into a normal test-suite assertion, so a
+regression fails the suite the same way any other regression would, instead of only showing up the
+next time someone runs `scryer` by hand. Neither loads with the gem automatically (RSpec/Minitest
+are never Scryer runtime dependencies — see the gemspec) — require the one matching your test
+framework yourself:
+
+```ruby
+# spec/spec_helper.rb (RSpec)
+require "scryer/rspec"
+
+RSpec.describe "security" do
+  it "has no critical findings" do
+    expect(Scryer.scan(root: Rails.root.to_s)).to have_no_critical_findings
+  end
+
+  it "never reintroduces the mass-assignment bug fixed in PR #123" do
+    expect(Scryer.scan(root: Rails.root.to_s)).to have_no_findings_for("mass_assignment")
+  end
+end
+```
+
+```ruby
+# test/test_helper.rb (Minitest / ActiveSupport::TestCase)
+require "scryer/minitest"
+
+class SecurityTest < ActiveSupport::TestCase
+  include Scryer::MinitestAssertions
+
+  test "no critical findings" do
+    assert_no_critical_scryer_findings(Scryer.scan(root: Rails.root.to_s))
+  end
+end
+```
+
+`Scryer.scan(root:)` runs the same static scan `scryer:report`/the `scryer` executable do (using
+`c.dirs`/`c.skip_rules` from your initializer), without needing a report written to disk —
+`have_no_critical_findings`/`assert_no_critical_scryer_findings` only look at *security* findings
+(same scoping as the [security score](#security-score)); `have_no_findings_for`/
+`assert_no_scryer_findings_for` check a specific `rule_id` across all three static categories,
+for pinning a specific bug so it can't come back unnoticed. This talks to the live filesystem on
+every test run (a real `Ripper`-based scan, same cost as running `scryer` itself) — for a large app
+this is meaningfully slower than a typical unit test, so it's usually one dedicated test/spec file
+run occasionally (a nightly job, a pre-release check) rather than part of every `rspec`/`rails test`
+invocation.
 
 ## Extending it
 
@@ -684,6 +1075,15 @@ Every rule is a small class extending `Scryer::Rule` — see `lib/scryer/rules/*
 the pattern. A new rule file dropped into any of the three directories is picked up automatically
 (rules self-register via `Rule.inherited` — no manual wiring needed, just `self.category =
 "security"|"performance"|"style"`). `Scryer::Ast` has the tree-walking helpers used throughout.
+
+Scryer's own rules have their own Minitest suite — `rake test` (from the repo root, not inside a
+host app) runs a bad/clean fixture pair against every registered rule (`test/rule_fixtures_test.rb`),
+plus a completeness check that fails loudly if a new rule ships with no fixture. Add an entry to
+`RuleFixturesTest::FIXTURES` for any new or changed rule — and, for a genuine false positive/
+negative found against real code (not just the regression pair), add it to
+[`benchmark/corpus.rb`](benchmark/corpus.rb) too (see [Accuracy benchmark](#accuracy-benchmark))
+with a `note:` explaining the real-world shape it represents, so it's measured going forward
+instead of just fixed once and forgotten.
 
 ## License
 

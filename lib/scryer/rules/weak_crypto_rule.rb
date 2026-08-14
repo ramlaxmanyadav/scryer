@@ -11,6 +11,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Weak hash algorithm used for password/credential hashing"
+      self.cwe = "CWE-327"
+      self.owasp_category = "A02:2021-Cryptographic Failures"
+      self.confidence = "medium"
 
       WEAK_DIGESTS = %w[MD5 SHA1].freeze
 

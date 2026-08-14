@@ -12,6 +12,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Authentication filter explicitly skipped"
+      self.cwe = "CWE-287"
+      self.owasp_category = "A07:2021-Identification and Authentication Failures"
+      self.confidence = "medium"
 
       SKIP_METHODS = %w[skip_before_action skip_action_callback skip_before_filter].freeze
       AUTH_FILTER_NAMES = %w[
@@ -25,7 +28,7 @@ module Scryer
         Ast.each_node(sexp) do |node|
           next unless Ast.tagged?(node, :class)
 
-          class_name = Ast.ident_text(node[1].is_a?(Array) ? node[1][1] : nil)
+          class_name = Ast.class_name(node[1])
           next unless class_name.to_s.end_with?("Controller")
 
           each_skip_call(node[3]).each do |skip_node, filter_name, args|

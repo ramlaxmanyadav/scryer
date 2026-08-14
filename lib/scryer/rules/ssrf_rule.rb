@@ -11,6 +11,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "critical"
       self.title = "Possible server-side request forgery (SSRF)"
+      self.cwe = "CWE-918"
+      self.owasp_category = "A10:2021-Server-Side Request Forgery"
+      self.confidence = "medium"
 
       DANGEROUS_CALLS = {
         "Net::HTTP" => %w[get get_response post post_form],

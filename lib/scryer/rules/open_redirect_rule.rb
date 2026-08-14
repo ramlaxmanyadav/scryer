@@ -10,6 +10,9 @@ module Scryer
       self.category = "security"
       self.default_severity = "warning"
       self.title = "Possible open redirect via unvalidated params"
+      self.cwe = "CWE-601"
+      self.owasp_category = "A01:2021-Broken Access Control"
+      self.confidence = "high"
 
       def scan
         findings = []
