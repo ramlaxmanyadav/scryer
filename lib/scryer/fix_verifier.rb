@@ -28,23 +28,53 @@ module Scryer
   # original file isn't readable, or this isn't a rule-backed Finding to
   # begin with). nil is deliberately distinct from false: it means "we don't
   # know," not "we checked and it's still broken."
+  #
+  # `apply!` below is the one place in this whole gem that ever writes an
+  # AI-generated fix to a real file — and even there, only after this exact
+  # same in-memory check says the fix genuinely clears the finding. See
+  # `scryer fix` (lib/scryer/cli.rb) for the only caller; nothing else in
+  # this gem calls it, including the ai_client-enhancement path a normal
+  # scan/report run uses (AiFixSuggester#enhance!), which only ever rewrites
+  # `finding.suggested_fix` text, never touches disk.
   module FixVerifier
     module_function
 
     AFTER_BLOCK = /AFTER:\s*```\w*\n(.*?)\n?```/m.freeze
 
     def verify(finding:, root:)
-      return nil unless finding.is_a?(Scryer::Finding)
-      return nil unless finding.line && finding.rule_id
+      verify_with_source(finding: finding, root: root).first
+    end
+
+    # Writes the verified fix to the real file and returns true, or returns
+    # the same false/nil `verify` would return without writing anything.
+    # Re-derives the verification (rather than trusting a `fix_verified`
+    # value computed earlier) so there's no window between "we checked" and
+    # "we wrote" where the file could have changed out from under it.
+    def apply!(finding:, root:)
+      verified, modified_source, abs_path = verify_with_source(finding: finding, root: root)
+      return verified unless verified == true
+
+      File.write(abs_path, modified_source)
+      true
+    rescue StandardError
+      nil
+    end
+
+    # [verified, modified_source, abs_path] — modified_source/abs_path are
+    # nil whenever verified isn't true (nothing for a caller to write in
+    # that case anyway).
+    def verify_with_source(finding:, root:)
+      return [nil, nil, nil] unless finding.is_a?(Scryer::Finding)
+      return [nil, nil, nil] unless finding.line && finding.rule_id
 
       after_snippet = extract_after_snippet(finding.suggested_fix)
-      return nil unless after_snippet
+      return [nil, nil, nil] unless after_snippet
 
       abs_path = File.join(root, finding.file.to_s)
-      return nil unless File.file?(abs_path)
+      return [nil, nil, nil] unless File.file?(abs_path)
 
       lines = File.read(abs_path).lines
-      return nil unless finding.line.between?(1, lines.size)
+      return [nil, nil, nil] unless finding.line.between?(1, lines.size)
 
       modified_source = apply_line_replacement(lines, finding.line, after_snippet)
 
@@ -53,15 +83,16 @@ module Scryer
       rescue StandardError
         nil
       end
-      return false if sexp.nil? # the rewritten line doesn't even parse — not a usable fix
+      return [false, nil, nil] if sexp.nil? # the rewritten line doesn't even parse — not a usable fix
 
       rule_class = Scryer::RuleSet.all.find { |r| r.rule_id == finding.rule_id }
-      return nil unless rule_class
+      return [nil, nil, nil] unless rule_class
 
       remaining = rule_class.new(file: finding.file, source: modified_source, sexp: sexp).scan
-      remaining.none? { |f| f.rule_id == finding.rule_id }
+      verified = remaining.none? { |f| f.rule_id == finding.rule_id }
+      verified ? [true, modified_source, abs_path] : [false, nil, nil]
     rescue StandardError
-      nil
+      [nil, nil, nil]
     end
 
     def extract_after_snippet(suggested_fix)

@@ -5,6 +5,21 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Fix mode: `scryer fix` (and `rails scryer:fix`) — the third leg of scan → fix → verify. Requires
+  an `ai_client`; asks it for a rewrite of every qualifying finding and **writes to the real file**
+  the ones `Scryer::FixVerifier` independently confirms actually clear the finding (re-parses the
+  file with that one line replaced and re-runs the flagged rule against it) — the same safety gate
+  AI-verified remediation already used for `fix_verified`, just now acting on it instead of only
+  reporting it. Anything not verified is left alone and listed as needing manual review, same as a
+  normal report. `--dry-run` previews without writing; `--rule`/`--file` scope to specific findings.
+  New `Scryer::FixRunner` module holds the apply/re-verify loop shared by both the CLI and rake
+  task (multiple fixes in one file are applied highest-line-number-first, so an earlier fix
+  expanding into several lines can't invalidate a not-yet-processed finding's line number earlier
+  in the same file); a final whole-project re-scan after every write confirms nothing regressed.
+  Covered by a new `test/fix_runner_test.rb` (dry-run never writes, real run writes only verified
+  fixes and skips the rest, the line-shift-ordering scenario specifically, and the re-verify step)
+  — 5 new tests, all passing alongside the existing suite.
+
 ## [1.1.1] - 2026-08-14
 
 - Docs-only, generic file/controller names — the finding counts, severities, rule IDs, and line numbers in

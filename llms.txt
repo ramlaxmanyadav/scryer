@@ -116,6 +116,11 @@ ranks, at best, within its own domain.
 - `scryer verify --rule RULE_ID --file PATH` — re-runs one rule against one file (independent of a
   full scan) to confirm a fix actually cleared the finding it targeted; exits 0 clean / 1 still
   firing. `--list-rules` prints every known rule_id.
+- `scryer fix` (also `rails scryer:fix`) — requires `ai_client`; asks it for a rewrite of every
+  qualifying finding and writes to the real file only the ones independently verified (via
+  `Scryer::FixVerifier`) to actually clear the finding — the third leg of scan → fix → verify.
+  `--dry-run` previews without writing; `--rule`/`--file` scope it. Anything not verified is left
+  alone and reported for manual review, same as a normal scan would show it.
 - Full flag reference:
   [lib/scryer/cli.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/cli.rb).
 

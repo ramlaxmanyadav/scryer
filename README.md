@@ -649,9 +649,63 @@ written, and each finding gets a `fix_verified: true/false/nil` field (`true`: t
 fires with this fix applied; `false`: it was checked and still fires, or the rewritten line doesn't
 even parse; `nil`: not attempted at all — no `ai_client` configured, or the AI's reply didn't
 include a usable code block). The HTML report shows this as a green "AI fix verified" or red "AI
-fix NOT verified" line under each finding's suggested fix. Nothing is ever written back to the real
-file for this check — same "never auto-applied" rule as `suggested_fix` itself; this only confirms
-whether the *suggestion* would work if you applied it.
+fix NOT verified" line under each finding's suggested fix. **This check itself never writes
+anything to a real file** — same "never auto-applied" rule `suggested_fix` always followed, up
+until `scryer fix` below, which is a deliberate, explicitly-invoked exception to that rule.
+
+## Fix mode
+
+`scryer fix` is the third leg of scan → fix → verify: it actually writes an AI-verified fix to the
+real file, instead of only reporting it as `fix_verified: true` for a human to apply by hand.
+
+```bash
+scryer fix -r ./scryer_config.rb          # writes every independently-verified fix it can
+scryer fix -r ./scryer_config.rb --dry-run   # preview only — same output, nothing written
+scryer fix -r ./scryer_config.rb --rule sql_injection --file app/models/order.rb
+```
+
+```
+scryer fix: 4 candidate finding(s) — asking the configured AI client for a rewrite of each,
+applying only the ones independently verified to clear the finding...
+
+Fixed 2 finding(s):
+  mass_assignment — app/controllers/orders_controller.rb:8
+  sql_injection — app/models/order.rb:12
+
+2 finding(s) need manual review (fix not independently verified):
+  idor — app/controllers/invoices_controller.rb:14
+  csrf_protection_disabled — app/controllers/api/webhooks_controller.rb:5
+
+Re-scanning to verify every applied fix...
+Verified: all 2 applied fix(es) confirmed clean on a full re-scan.
+```
+
+**The safety gate is the same FixVerifier check described above, not a new one** — a fix only ever
+gets written when re-parsing the file with that one line replaced, and re-running the one rule that
+flagged it, confirms the rule no longer fires. Anything the AI couldn't produce a usable `AFTER:`
+block for, or whose rewrite still fires (or doesn't even parse), is left completely alone and
+listed under "need manual review" — same as it would show up in a normal report. Requires an
+`ai_client`; there's no non-AI fallback, since a rule's generic `suggested_fix` is prose, not
+something this command can apply mechanically.
+
+Three things worth knowing before running it:
+
+- **This modifies real files.** Run it in a repo under version control and review the diff
+  (`git diff`) before committing — same as you'd review any auto-formatter's output
+  (`rubocop -A`, `prettier --write`). Nothing here is any more "trusted" than an LLM's raw
+  suggestion; the verification only confirms the *targeted rule* stops firing, not that the
+  rewrite is otherwise correct, idiomatic, or free of a different problem.
+- **Multiple fixes in the same file are applied highest-line-number first**, so an earlier fix
+  that expands one line into several doesn't shift the line numbers a later (in file order, earlier
+  in processing order) fix depends on — covered by an automated test against exactly this scenario
+  (`test/fix_runner_test.rb`'s `test_line_shifting_fix_applied_first_does_not_break_an_earlier_finding`).
+- **The final re-scan is the real "verify" step**, not the per-fix check — it catches anything the
+  narrower per-file check couldn't see, like two fixes interacting across files. This is the same
+  reason `scryer verify`'s single-rule check and a full `scryer` run answer different questions.
+
+Inside a Rails app: `rails scryer:fix` (optionally `rails 'scryer:fix[rule_id]'` to scope to one
+rule, or `SCRYER_FIX_DRY_RUN=1 rails scryer:fix` to preview) — same behavior, `c.ai_client` from
+`config/initializers/scryer.rb` instead of `-r`.
 
 ## What gets scanned
 

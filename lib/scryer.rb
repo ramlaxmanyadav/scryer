@@ -14,6 +14,7 @@ require "scryer/baseline"
 require "scryer/ai_client"
 require "scryer/fix_verifier"
 require "scryer/ai_fix_suggester"
+require "scryer/fix_runner"
 
 Dir[File.join(__dir__, "scryer", "rules", "*.rb")].sort.each { |f| require f }
 Dir[File.join(__dir__, "scryer", "performance_rules", "*.rb")].sort.each { |f| require f }

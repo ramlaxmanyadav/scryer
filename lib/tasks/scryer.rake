@@ -131,6 +131,49 @@ namespace :scryer do
     puts "Scryer: saved baseline of #{all_findings.size} finding(s) to #{path}."
   end
 
+  desc "Scan, then ask the configured c.ai_client for a rewrite of every qualifying finding and " \
+       "write the ones independently verified to actually clear it (see Scryer::FixVerifier) — " \
+       "requires c.ai_client to be set (config/initializers/scryer.rb); anything not verified is " \
+       "left alone and reported for manual review, same as a normal report would show it. Takes " \
+       "an optional rule_id bracket arg to only fix that rule; set SCRYER_FIX_DRY_RUN=1 to preview " \
+       "without writing anything. e.g. rails scryer:fix, rails 'scryer:fix[sql_injection]', " \
+       "SCRYER_FIX_DRY_RUN=1 rails scryer:fix"
+  task :fix, [:rule_id] do |_, args|
+    ai_client = Scryer.configuration.ai_client
+    abort("Scryer: scryer:fix needs c.ai_client configured in config/initializers/scryer.rb — " \
+          "a rule's generic suggested_fix is prose, not something this task can apply " \
+          "automatically. Nothing has been changed.") unless ai_client
+
+    root = defined?(Rails) ? Rails.root.to_s : Dir.pwd
+    dirs = Scryer.configuration.dirs
+    skip_rules = Scryer.configuration.skip_rules
+    dry_run = !blank_to_nil(ENV["SCRYER_FIX_DRY_RUN"]).nil?
+
+    result = Scryer::Scanner.new(root: root, dirs: dirs, skip_rules: skip_rules).call
+    candidates = result.security_findings + result.performance_findings + result.style_findings
+    candidates = candidates.select { |f| f.rule_id == args[:rule_id] } if args[:rule_id]
+
+    if candidates.empty?
+      puts "Scryer: no matching findings to fix."
+      next
+    end
+
+    puts "Scryer: #{candidates.size} candidate finding(s) — asking the configured AI client for " \
+         "a rewrite of each, applying only the ones independently verified to clear the " \
+         "finding#{dry_run ? " (SCRYER_FIX_DRY_RUN: nothing will actually be written)" : ""}..."
+
+    fixed, skipped = Scryer::FixRunner.apply(candidates, client: ai_client, root: root, dry_run: dry_run)
+    ScryerTasks.print_fix_summary(fixed: fixed, skipped: skipped, dry_run: dry_run)
+
+    if !dry_run && fixed.any?
+      puts "Scryer: re-scanning to verify every applied fix..."
+      regressed = Scryer::FixRunner.verify(fixed, root: root, dirs: dirs, skip_rules: skip_rules)
+      ScryerTasks.print_fix_verification(regressed, total: fixed.size)
+    end
+
+    abort("Scryer: #{skipped.size} finding(s) still need manual review.") if !dry_run && skipped.any?
+  end
+
   desc "Check Gemfile.lock for known-vulnerable gem versions (via OSV.dev — needs network) " \
        "and insecure git/http gem sources (offline). Exits non-zero if anything is found, so " \
        "this can gate CI the same way `bundle-audit check` does."
@@ -337,5 +380,30 @@ module ScryerTasks
     puts "OWASP Top 10 (2021) coverage:"
     coverage.each { |category, count| puts "  #{category}: #{count} finding#{"s" unless count == 1}" }
     puts ""
+  end
+
+  def print_fix_summary(fixed:, skipped:, dry_run:)
+    verb = dry_run ? "Would fix" : "Fixed"
+    puts ""
+    puts "#{verb} #{fixed.size} finding(s):"
+    fixed.each { |f| puts "  #{f.rule_id} — #{f.file}:#{f.line}" }
+    puts ""
+
+    return if skipped.empty?
+
+    puts "#{skipped.size} finding(s) need manual review (fix not independently verified):"
+    skipped.each { |f| puts "  #{f.rule_id} — #{f.file}:#{f.line}" }
+    puts ""
+  end
+
+  def print_fix_verification(regressed, total:)
+    if regressed.empty?
+      puts "Verified: all #{total} applied fix(es) confirmed clean on a full re-scan."
+    else
+      puts "Warning: #{regressed.size} of #{total} applied fix(es) still show up on a full " \
+           "re-scan (an edit may have shifted another finding onto the same rule, or a " \
+           "duplicate finding existed elsewhere) — review these by hand:"
+      regressed.each { |f| puts "  #{f.rule_id} — #{f.file}:#{f.line}" }
+    end
   end
 end

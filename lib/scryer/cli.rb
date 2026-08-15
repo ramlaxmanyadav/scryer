@@ -26,6 +26,7 @@ module Scryer
       # would collide with the main parser's -p/-o meanings, so it's
       # dispatched before the main OptionParser ever sees the rest of argv.
       return run_verify(@argv[1..]) if @argv.first == "verify"
+      return run_fix(@argv[1..]) if @argv.first == "fix"
 
       options = parse(@argv)
       return 0 if options[:exit_early]
@@ -266,6 +267,116 @@ module Scryer
         @stdout.puts "scryer verify: #{options[:rule]} still fires on #{rel_path} (#{findings.size} finding(s)):"
         findings.each { |f| @stdout.puts "  line #{f.line}: #{f.message}" }
         1
+      end
+    end
+
+    # `scryer fix` — the third leg of scan → fix → verify. Scans, asks the
+    # configured `ai_client` for a rewrite of every qualifying finding (same
+    # AiFixSuggester/FixVerifier machinery `scryer:report` already uses to
+    # populate `fix_verified`), and — this is the one command in the whole
+    # gem that does this — actually writes a fix to a real file, but ONLY
+    # when FixVerifier's in-memory check says that exact rewrite clears the
+    # finding. Anything not independently verified this way is left alone
+    # and reported as needing manual review, same as it would be in a normal
+    # report; this command never writes an unverified guess. Requires an
+    # `ai_client` (see -r/--require) — there's no non-AI fallback, since a
+    # rule's generic suggested_fix is prose, not a machine-applicable patch.
+    def run_fix(argv)
+      options = {}
+
+      parser = OptionParser.new do |opts|
+        opts.banner = "Usage: scryer fix [--rule RULE_ID] [--file PATH] [--path ROOT] [--dry-run]"
+        opts.on("--rule RULE_ID", "Only fix findings for this rule_id (repeatable).") { |v| (options[:rules] ||= []) << v }
+        opts.on("--file PATH", "Only fix findings in this file (repeatable) — relative to --path, or absolute.") { |v| (options[:files] ||= []) << v }
+        opts.on("--path ROOT", "Project root to scan (default: current directory).") { |v| options[:root] = v }
+        opts.on("-r PATH", "--require PATH",
+                "Require a Ruby file before scanning (repeatable) — use this to call " \
+                "Scryer.configure and set c.ai_client, same as the main scan command.") { |v| (options[:require] ||= []) << v }
+        opts.on("--skip RULE_ID", "Skip a rule by rule_id (repeatable), same as the main scan command.") { |v| (options[:skip] ||= []) << v }
+        opts.on("--dry-run", "Show what would be fixed without writing anything.") { options[:dry_run] = true }
+        opts.on("-h", "--help", "Show this help.") { options[:exit_early] = true; @stdout.puts opts }
+      end
+
+      begin
+        parser.parse!(argv)
+      rescue OptionParser::ParseError => e
+        raise UsageError, "#{e.message}\n#{parser}"
+      end
+      return 0 if options[:exit_early]
+
+      Array(options[:require]).each { |path| require File.expand_path(path) }
+
+      ai_client = Scryer.configuration.ai_client
+      unless ai_client
+        raise UsageError, "scryer fix needs an ai_client configured (see -r/--require and the " \
+                           "README's \"AI-assisted fix suggestions\" section) — a rule's generic " \
+                           "suggested_fix is prose, not something this command can apply " \
+                           "automatically. Nothing has been changed.\n#{parser}"
+      end
+
+      root = File.expand_path(options[:root] || Dir.pwd)
+      skip_rules = Scryer.configuration.skip_rules + (options[:skip] || [])
+      result = Scanner.new(root: root, dirs: Scryer.configuration.dirs, skip_rules: skip_rules).call
+
+      candidates = (result.security_findings + result.performance_findings + result.style_findings)
+      candidates = candidates.select { |f| options[:rules].include?(f.rule_id) } if options[:rules]
+      candidates = candidates.select { |f| fix_target_file?(f, options[:files], root) } if options[:files]
+
+      if candidates.empty?
+        @stdout.puts "scryer fix: no matching findings to fix."
+        return 0
+      end
+
+      @stdout.puts "scryer fix: #{candidates.size} candidate finding(s) — asking the configured " \
+                   "AI client for a rewrite of each, applying only the ones independently " \
+                   "verified to clear the finding#{options[:dry_run] ? " (--dry-run: nothing will actually be written)" : ""}..."
+
+      fixed, skipped = FixRunner.apply(candidates, client: ai_client, root: root, dry_run: options[:dry_run])
+
+      print_fix_summary(fixed: fixed, skipped: skipped, dry_run: options[:dry_run])
+
+      return 0 if options[:dry_run] || skipped.empty?
+
+      verify_applied_fixes(fixed, root: root, skip_rules: skip_rules) if fixed.any?
+
+      skipped.empty? ? 0 : 1
+    end
+
+    def print_fix_summary(fixed:, skipped:, dry_run:)
+      verb = dry_run ? "Would fix" : "Fixed"
+      @stdout.puts ""
+      @stdout.puts "#{verb} #{fixed.size} finding(s):"
+      fixed.each { |f| @stdout.puts "  #{f.rule_id} — #{f.file}:#{f.line}" }
+      @stdout.puts ""
+
+      return if skipped.empty?
+
+      @stdout.puts "#{skipped.size} finding(s) need manual review (fix not independently verified):"
+      skipped.each { |f| @stdout.puts "  #{f.rule_id} — #{f.file}:#{f.line}" }
+      @stdout.puts ""
+    end
+
+    # The "verify" leg: re-scan the whole project after every fix has been
+    # written and confirm each one is actually gone — see FixRunner.verify.
+    def verify_applied_fixes(fixed, root:, skip_rules:)
+      @stdout.puts "Re-scanning to verify every applied fix..."
+      regressed = FixRunner.verify(fixed, root: root, dirs: Scryer.configuration.dirs, skip_rules: skip_rules)
+
+      if regressed.empty?
+        @stdout.puts "Verified: all #{fixed.size} applied fix(es) confirmed clean on a full re-scan."
+      else
+        @stdout.puts "Warning: #{regressed.size} of #{fixed.size} applied fix(es) still show up on a full " \
+                     "re-scan (an edit may have shifted another finding onto the same rule, or a duplicate " \
+                     "finding existed elsewhere) — review these by hand:"
+        regressed.each { |f| @stdout.puts "  #{f.rule_id} — #{f.file}:#{f.line}" }
+      end
+    end
+
+    def fix_target_file?(finding, files, root)
+      files.any? do |f|
+        abs = File.expand_path(f, root)
+        rel = abs.sub(/\A#{Regexp.escape(root)}\/?/, "")
+        finding.file == rel || finding.file == f
       end
     end
 
