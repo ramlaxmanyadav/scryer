@@ -89,10 +89,47 @@ module Scryer
       return [nil, nil, nil] unless rule_class
 
       remaining = rule_class.new(file: finding.file, source: modified_source, sexp: sexp).scan
-      verified = remaining.none? { |f| f.rule_id == finding.rule_id }
+
+      # Matched by rule_id + code_snippet (same identity Baseline fingerprints
+      # use), NOT just rule_id — a file with two separate sql_injection
+      # findings must let each be verified independently. Checking only
+      # rule_id here would mean neither ever verifies, since fixing one line
+      # in isolation always leaves the other (still-unfixed) occurrence
+      # showing up in `remaining`.
+      target_snippet = finding.code_snippet.to_s.strip
+      rule_cleared = remaining.none? { |f| f.rule_id == finding.rule_id && f.code_snippet.to_s.strip == target_snippet }
+      verified = rule_cleared && !introduces_undefined_params_helper?(finding.code_snippet, after_snippet, modified_source)
       verified ? [true, modified_source, abs_path] : [false, nil, nil]
     rescue StandardError
       [nil, nil, nil]
+    end
+
+    PARAMS_HELPER_NAME = /\b([a-z_][a-zA-Z0-9_]*_params)\b/.freeze
+
+    # A common, real failure mode found in production: mass_assignment's own
+    # suggested_fix (and the AI prompt built from it) recommends extracting a
+    # strong-parameters helper — "wrap in `order_params`, with `def
+    # order_params; params.require(...).permit(...); end`" — but `AFTER:` can
+    # only ever replace the single flagged line, never add a method
+    # definition elsewhere in the file. An AI reply that takes this approach
+    # ends up calling a helper (e.g. `create_charge_params[:account_id]`)
+    # that was never actually defined anywhere — syntactically valid Ruby, so
+    # it parses fine, and the mass_assignment rule stops firing (the line no
+    # longer references `params` directly), so this "verifies" clean by
+    # every check above... and then raises NoMethodError the moment it
+    # actually runs. Only flags a name that's *new* in this rewrite (already
+    # present in the original flagged line means it's not this fix's doing,
+    # and may well be defined in a parent class/concern this per-file check
+    # can't see) and has no matching `def` anywhere in the file. Like every
+    # other heuristic here, this can false-positive (a legitimately
+    # inherited helper looks identical to a hallucinated one from a single
+    # file's contents) — declining a fix that would have been fine is the
+    # safe direction to err in; writing one that crashes at runtime is not.
+    def introduces_undefined_params_helper?(original_line, after_snippet, full_source)
+      original_names = original_line.to_s.scan(PARAMS_HELPER_NAME).flatten
+      new_names = after_snippet.to_s.scan(PARAMS_HELPER_NAME).flatten.uniq - original_names
+
+      new_names.any? { |name| !full_source.match?(/\bdef\s+#{Regexp.escape(name)}\b/) }
     end
 
     def extract_after_snippet(suggested_fix)
@@ -103,8 +140,27 @@ module Scryer
       content.strip.empty? ? nil : content
     end
 
+    # An AI reply's AFTER: block is asked for "a drop-in replacement for the
+    # single offending line" — in practice, models frequently reply with
+    # that replacement flush against the left margin, dropping the original
+    # line's indentation entirely (confirmed against a real AI-generated fix
+    # in production). Ruby doesn't care, so this was never a *correctness*
+    # bug, but a fix that silently de-indents a line looks nothing like what
+    # a developer would actually commit. Restores the original line's
+    # leading whitespace onto the replacement's first line specifically —
+    # only when the replacement doesn't already start with any indentation
+    # of its own, so a reply that already got it right (or a multi-line
+    # reply whose later lines carry their own deliberate relative indent)
+    # is left alone.
     def apply_line_replacement(lines, line_number, replacement)
-      replacement_text = replacement.end_with?("\n") ? replacement : "#{replacement}\n"
+      original_indent = lines[line_number - 1].to_s[/\A[ \t]*/]
+      replacement_lines = replacement.lines
+      if replacement_lines.first && replacement_lines.first !~ /\A[ \t]/
+        replacement_lines[0] = "#{original_indent}#{replacement_lines[0]}"
+      end
+
+      replacement_text = replacement_lines.join
+      replacement_text = "#{replacement_text}\n" unless replacement_text.end_with?("\n")
       modified = lines.dup
       modified[line_number - 1] = replacement_text
       modified.join

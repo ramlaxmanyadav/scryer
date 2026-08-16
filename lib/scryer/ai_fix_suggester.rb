@@ -24,7 +24,12 @@ module Scryer
       # Enhances a single Finding in place and returns it. Any failure
       # (client raises, times out, returns nothing usable) is swallowed and
       # the finding's original suggested_fix is left as-is — an LLM call
-      # failing should never break a scan.
+      # failing should never break a scan. `on_error`, when given, is called
+      # with (finding, exception) right before it's swallowed — the failure
+      # still never propagates, but a caller that wants to surface *why* a
+      # finding fell through to manual review (a bad API key, a timeout, a
+      # malformed response) can. Without it, a failing client and "no
+      # ai_client configured at all" look identical from the outside.
       #
       # `root`, when given (and only for a Scryer::Finding — see
       # FixVerifier), triggers a follow-up verification pass: re-read the
@@ -33,14 +38,15 @@ module Scryer
       # against the result. Sets finding.fix_verified to true/false/nil (see
       # Finding#fix_verified) — never raises, same failure-swallowing
       # philosophy as the AI call itself.
-      def enhance!(finding, client: Scryer.configuration.ai_client, root: nil)
+      def enhance!(finding, client: Scryer.configuration.ai_client, root: nil, on_error: nil)
         return finding unless client
 
         reply = call_client(client, prompt_for(finding))
         finding.suggested_fix = reply.strip unless blank?(reply)
         finding.fix_verified = FixVerifier.verify(finding: finding, root: root) if root
         finding
-      rescue StandardError
+      rescue StandardError => e
+        on_error&.call(finding, e)
         finding
       end
 

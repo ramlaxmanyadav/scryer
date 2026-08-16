@@ -31,10 +31,19 @@ module Scryer
     # `skip_rules` silences specific checks by rule_id (e.g. a known false
     # positive on this codebase) without editing/removing the rule itself —
     # accepts strings or symbols, matched against Rule.rule_id.
-    def initialize(root:, dirs: DEFAULT_GLOB_DIRS, skip_rules: [])
+    #
+    # `detect_duplicates: false` skips duplicate-code detection entirely
+    # (method/query/cache-key extraction and the DuplicateDetector passes
+    # below) — unlike the security/performance/style rules, duplicate
+    # detection isn't a `Scryer::Rule` with its own rule_id, so `skip_rules`
+    # has no way to address it; this is its equivalent off switch. See
+    # `Scryer::Configuration#detect_duplicates` for the config-driven default
+    # every CLI/rake entry point reads before constructing a Scanner.
+    def initialize(root:, dirs: DEFAULT_GLOB_DIRS, skip_rules: [], detect_duplicates: true)
       @root = File.expand_path(root)
       @dirs = dirs
       @skip_rules = Set.new(skip_rules.map(&:to_s))
+      @detect_duplicates = detect_duplicates
     end
 
     def call
@@ -77,24 +86,28 @@ module Scryer
           bucket.concat(rule_class.new(file: rel_path, source: source, sexp: sexp).scan)
         end
 
-        if duplicate_detection_target?(rel_path)
+        if @detect_duplicates && duplicate_detection_target?(rel_path)
           all_methods.concat(MethodExtractor.extract(file: rel_path, source: source, sexp: sexp))
           all_queries.concat(QueryExtractor.extract(file: rel_path, source: source, sexp: sexp))
           all_cache_calls.concat(CacheExtractor.extract(file: rel_path, source: source, sexp: sexp))
         end
       end
 
-      # Same computed value cached under the same key from multiple call
-      # sites is normal (just reusing the cache). Only flag it when the
-      # *keys* differ too — that's either a redundant cache entry or a key
-      # that drifted out of sync with a copy-pasted sibling.
-      cache_groups = DuplicateDetector.call(all_cache_calls, threshold: CACHE_SIMILARITY_THRESHOLD, kind: "cache_duplicate")
-                                       .select { |g| g.members.map(&:cache_key).uniq.size > 1 }
-
       duplicate_groups =
-        DuplicateDetector.call(all_methods, kind: "method_duplicate") +
-        DuplicateDetector.call(all_queries, threshold: QUERY_SIMILARITY_THRESHOLD, kind: "query_duplicate") +
-        cache_groups
+        if @detect_duplicates
+          # Same computed value cached under the same key from multiple call
+          # sites is normal (just reusing the cache). Only flag it when the
+          # *keys* differ too — that's either a redundant cache entry or a
+          # key that drifted out of sync with a copy-pasted sibling.
+          cache_groups = DuplicateDetector.call(all_cache_calls, threshold: CACHE_SIMILARITY_THRESHOLD, kind: "cache_duplicate")
+                                           .select { |g| g.members.map(&:cache_key).uniq.size > 1 }
+
+          DuplicateDetector.call(all_methods, kind: "method_duplicate") +
+            DuplicateDetector.call(all_queries, threshold: QUERY_SIMILARITY_THRESHOLD, kind: "query_duplicate") +
+            cache_groups
+        else
+          []
+        end
 
       Result.new(
         security_findings: security_findings,

@@ -5,6 +5,101 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-16
+
+- Added `c.detect_duplicates` (`Scryer::Configuration`, default `true`): duplicate-code detection
+  (method/query/cache-key similarity across models, controllers, helpers, and concerns) previously
+  ran unconditionally with no way to turn it off, since it isn't a `Scryer::Rule` and has no
+  `rule_id` for `skip_rules` to address. Set `c.detect_duplicates = false` in
+  `config/initializers/scryer.rb` to disable it project-wide, or override for a single run with
+  the standalone executable's new `--no-duplicates` flag or the rake task's new `noduplicates`
+  bracket token (`rails 'scryer:report[html,noduplicates]'`, alongside the existing `nodeps`) —
+  either can only turn detection off, never back on over an already-`false` config. `scryer
+  verify`/`scryer fix`/the fix-verification re-scan now always skip this pass internally too (none
+  of them ever read `duplicate_groups`), a small unconditional performance improvement independent
+  of this new config. Covered by new tests in `test/scanner_test.rb` and `test/cli_scan_test.rb`.
+- The standalone `scryer`/`scryer fix` executable no longer requires `-r`/`--require` to pick up
+  an `ai_client` — if it's omitted entirely, `config/initializers/scryer.rb` under `--path` is now
+  auto-required when it exists (the same file a Rails app booted against the project would already
+  autoload). This was the single most common cause of "AI is configured but nothing gets fixed"
+  seen in real usage: forgetting `-r` silently left `ai_client` `nil`, indistinguishable from no
+  client being configured at all. An explicit `-r` always wins and is never overridden; a one-line
+  notice is printed whenever auto-discovery fires so it's never a silent behavior switch. Covered
+  by new tests in `test/cli_fix_test.rb`.
+- `scryer fix`/`rails scryer:fix`'s interactive per-finding review prompt is now a numbered menu
+  (`1) Yes  2) Skip  3) Yes to all remaining  4) Cancel`) instead of `[y]es/[n]o/[a]ll/[s]kip`
+  letters — numeric choices only, and a blank or unrecognized answer re-prompts instead of
+  defaulting to "no." New: option 4, "Cancel," stops the review immediately — every remaining
+  candidate is marked skipped without even asking the AI client or mechanical fixer for a rewrite
+  (previously "skip all remaining" still ran an AI call for every not-yet-reviewed finding before
+  discarding the result). `Scryer::FixRunner.apply`'s `confirm:` callback can now return the symbol
+  `:cancel` to trigger this; a new `:cancelled` status is yielded to the progress block. `--yes`
+  (`SCRYER_FIX_YES=1`) remains the one-shot non-interactive way to fix everything in a single
+  command. Covered by new tests in `test/cli_fix_test.rb` and `test/fix_runner_test.rb`.
+- Added `scryer fix --deps` (`SCRYER_FIX_DEPS=1 rails scryer:fix`): the 24-ish dependency findings
+  from `scryer --audit-deps`/`rails scryer:audit_dependencies` were previously report-only — nothing
+  in `scryer fix` ever touched them, since a `DependencyAudit::Finding` has no `.line`/`.file`/
+  `.rule_id` for `FixRunner`/`MechanicalFixer`/`FixVerifier` to target. New `Scryer::DependencyFixer`
+  runs `bundle update GEM --conservative` once per distinct vulnerable gem that has a published
+  patched version, then re-queries OSV.dev for that gem to confirm the bump actually cleared every
+  advisory before reporting it fixed. Gems with no fixed version yet, insecure `git://`/`http://`
+  sources, a past-EOL Ruby version, and an exposed `config/master.key` are always left for manual
+  review — none of those are a gem-version bump. Supports `--dry-run`. Covered by
+  `test/dependency_fixer_test.rb` and `test/cli_fix_deps_test.rb`.
+- `scryer fix`/`rails scryer:fix` now try the configured `ai_client` *before* `Scryer::MechanicalFixer`
+  for every rule, including the six the mechanical fixer can already handle on its own
+  (`frozen_string_literal`, `sql_injection`'s sole-argument case, and the four config-flip rules) —
+  previously the mechanical fixer always won when it applied, even with an `ai_client` configured.
+  The mechanical fixer is now the fallback: it only runs when AI isn't configured, declined to
+  produce anything usable, raised, or its rewrite didn't verify. Same verify-then-write safety gate
+  either way. Fixed `FixVerifier.apply_line_replacement` to restore a line's original indentation
+  when an AI reply's `AFTER:` block drops it (confirmed against a real AI-generated fix in
+  production that came back flush against the left margin instead of matching the original 8-space
+  indent) — not a correctness bug, but a fix that silently strips indentation looks nothing like
+  something a developer would actually commit. Covered by new tests in `test/fix_runner_test.rb`.
+- Fixed: `scryer fix`/`rails scryer:fix` silently swallowed an `ai_client` that raised an exception
+  (a bad API key, a network timeout, a malformed response) — it looked identical to "no ai_client
+  configured at all," both showing up as a generic `Skipped (needs manual review)` with the rule's
+  own default `suggested_fix` text, no way to tell which one actually happened. `AiFixSuggester.enhance!`
+  now accepts an `on_error:` callback (the failure still never propagates or breaks the run);
+  `FixRunner.apply` surfaces it as a new `:ai_error` status distinct from `:skipped`, and both
+  `scryer fix` and `rails scryer:fix` now print the actual exception class and message
+  (`Skipped (AI client error): mass_assignment — ...` / `RuntimeError: 401 Unauthorized`) instead
+  of leaving you to guess. Covered by new tests in `test/fix_runner_test.rb` and `test/cli_fix_test.rb`.
+- `scryer verify` no longer requires both `--rule` and `--file` — omit either or both to broaden
+  scope: `--file PATH` alone checks every rule against that one file; `--rule ID` alone checks the
+  whole project for that one rule; neither flag checks the whole project against every rule (same
+  security/performance/style scope `--baseline` uses; duplicate-code groups excluded for the same
+  reason `--baseline` excludes them — they don't fit the same single-finding shape). The original
+  `--rule ID --file PATH` case is unchanged. The three broader cases print grouped by severity
+  (critical first) with each finding's message truncated to a scannable length, instead of a wall
+  of full-length messages — full untruncated detail is what a real `scryer -o report.json`/
+  `report.html` is for. Covered by `test/cli_verify_test.rb` (10 tests).
+- Colored console output: the summary box, top priorities, and `scryer fix`/`scryer verify` output
+  are colored automatically at a real terminal (severity labels, the security score's letter
+  grade, fixed/skipped status lines) via a new hand-rolled `Scryer::Colorizer` — no new gem
+  dependency, consistent with the zero-runtime-dependency design. Off automatically when it would
+  be wrong to color (piped/redirected output, [`NO_COLOR`](https://no-color.org) set, `TERM=dumb`);
+  `--color`/`--no-color` (CLI) or `SCRYER_COLOR`/`SCRYER_NO_COLOR` (rake) force it either way,
+  taking precedence over `NO_COLOR`/auto-detection (an explicit per-invocation flag is more
+  specific than a session-wide env var — the same precedence ripgrep/eslint use). Covered by a new
+  `test/colorizer_test.rb` (13 tests).
+- New `Scryer::MechanicalFixer`: deterministic, no-AI fixes for `frozen_string_literal`,
+  `sql_injection` (sole-argument case only), `force_ssl_disabled`, `insecure_cookie_serializer`,
+  `weak_session_cookie`, and `security_headers_disabled` (plain-assignment case only) — the narrow
+  set of rules where there's exactly one correct rewrite, so `scryer fix`/`rails scryer:fix` no
+  longer require an `ai_client` to fix these. A mechanical fixer always wins over the AI path when
+  one applies; falls through to `ai_client` (or manual review) otherwise. Flows through the exact
+  same verify-then-write pipeline as an AI-generated fix — nothing here is trusted more than an
+  LLM's guess would be. Fixes correctly strip quote marks directly hugging a `#{...}` interpolation
+  (the common `"id = '#{x}'"` manual-SQL-quoting style) rather than leaving them around the new `?`
+  placeholder — naively swapping just the interpolation would produce `where("id = '?'", x)`, which
+  double-quotes the bound value and silently breaks the query while still looking "verified" (the
+  rule only checks for interpolation, not query correctness) — covered by a dedicated regression
+  test. `scryer fix`'s usage error is now only raised when there's genuinely nothing an invocation
+  could fix (no `ai_client` AND nothing matched has a built-in fixer). Covered by
+  `test/mechanical_fixer_test.rb` (13 tests) plus updated coverage in `test/fix_runner_test.rb` and
+  `test/cli_fix_test.rb`.
 - Fix mode: `scryer fix` (and `rails scryer:fix`) — the third leg of scan → fix → verify. Requires
   an `ai_client`; asks it for a rewrite of every qualifying finding and **writes to the real file**
   the ones `Scryer::FixVerifier` independently confirms actually clear the finding (re-parses the
@@ -19,6 +114,60 @@ All notable changes to this project are documented here. Format loosely follows
   Covered by a new `test/fix_runner_test.rb` (dry-run never writes, real run writes only verified
   fixes and skips the rest, the line-shift-ordering scenario specifically, and the re-verify step)
   — 5 new tests, all passing alongside the existing suite.
+- Fixed: `scryer fix`'s final re-scan verify step was silently skipped whenever every candidate
+  fixed successfully (it only ran when something was left for manual review) — the CLI never
+  actually confirmed its own writes on the common, all-clean path. `rails scryer:fix` never had
+  this bug. Caught by new CLI-level tests (`test/cli_fix_test.rb`) exercising `Scryer::CLI#run_fix`
+  directly, which the original `FixRunner`-only tests didn't cover.
+- `scryer fix`/`rails scryer:fix`: pick specific findings by number when `--rule`/`--file` still
+  leave more than one candidate — `--list` (`SCRYER_FIX_LIST=1` for the rake task) prints a stable,
+  numbered candidate list without calling the AI client or writing anything; `--number 2` /
+  `--number 1,3` (`SCRYER_FIX_NUMBERS=...`) fixes only those positions.
+- Fixed: `FixVerifier` marked a fix as "not verified" whenever the same rule fired *anywhere else in
+  the file*, instead of checking whether the specific offending code it targeted was gone — so a
+  file with two separate findings of the same rule (e.g. two `sql_injection` occurrences) could
+  never have either one verified, even when both individual fixes were completely correct. Now
+  matched by rule_id + `code_snippet`, the same identity `Baseline` fingerprints already use, so
+  each finding verifies independently of any others sharing its rule_id. Found by dry-running
+  `scryer fix --rule sql_injection` against a real app with two such findings in one file; covered
+  by a new regression test in `test/fix_runner_test.rb`.
+- `scryer fix`/`rails scryer:fix` now print a live progress line for each finding as it's resolved
+  ("Fixed: ...", "Would fix: ...", "Skipped (needs manual review): ...") instead of only the final
+  summary once every candidate is done — each `Fixed`/`Would fix` line includes a short 1-2
+  sentence explanation of the change, pulled from the AI's own reply (`Scryer::FixRunner.explain`)
+  rather than only a bare rule_id/file/line. The final summary and re-scan verify step are
+  unchanged.
+- `frozen_string_literal` is now opt-in for an unscoped `scryer fix`/`rails scryer:fix` sweep (no
+  `--rule`/rule_id given) — it's a cosmetic, `info`-severity finding that would otherwise touch
+  nearly every file in a project. At a real terminal it asks once, up front; non-interactively
+  (CI, piped stdin) it's excluded with a one-line notice, discoverable via
+  `--rule frozen_string_literal` / `SCRYER_FIX_YES=1`. `Scryer::MechanicalFixer.fix_frozen_string_literal`
+  also now actually analyzes the file before recommending the fix — it declines (falls back to
+  manual review) if it finds a plausible in-place string mutation (a bang-method or `<<` on a
+  string literal, or on a local variable assigned one earlier in the file), since freezing a file's
+  literals would otherwise raise `FrozenError` at runtime while still looking "verified" by
+  Scryer's own narrow check (it only looks for the magic comment's absence, not query/mutation
+  correctness).
+- `scryer fix`/`rails scryer:fix`: per-finding interactive review. At a real terminal (not
+  `--dry-run`/`--yes`/`SCRYER_FIX_YES`), every independently-verified fix — rule, message,
+  explanation, and the actual `AFTER:` rewrite — is shown and confirmed one at a time before being
+  written, instead of silently applying everything that verified clean: `[y]es` / `[n]o` / `[a]ll
+  remaining` / `[s]kip all remaining`. Non-interactive runs keep applying everything automatically,
+  same as before this existed. `Scryer::FixRunner.apply` gained an optional `confirm:` callback
+  (model-layer, testable without a real terminal); the CLI/rake task supply the actual prompt. This
+  replaces the old upfront "pick which numbered findings to fix" prompt that used to appear
+  automatically in an interactive terminal with more than one match and no `--number` — the new
+  per-finding review covers the same need with more information (you see the actual diff) and less
+  friction (no numbers to type); `--number`/`--list` remain for scripted/non-interactive scoping.
+- Fixed: every `Scryer::MechanicalFixer` rewrite was built from `finding.code_snippet`, which
+  `Ast.source_line` deliberately `.strip`s for display in a report — so a mechanically-fixed line
+  silently lost its original indentation on every real write (not a syntax break, since Ruby
+  doesn't require indentation, but a real diff-correctness bug no prior test caught, since they all
+  used `assert_includes`, which doesn't care about leading whitespace). Fixers now read the actual
+  on-disk line via a new `raw_line` helper; `security_headers_disabled`'s comment-out rewrite also
+  now preserves the original line's indentation instead of jumping to column 0. Covered by a new
+  regression test in `test/fix_runner_test.rb` that checks the exact written line, not just a
+  substring.
 
 ## [1.1.1] - 2026-08-14
 
