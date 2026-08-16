@@ -1,4 +1,5 @@
 require "scryer/version"
+require "scryer/colorizer"
 require "scryer/ast"
 require "scryer/finding"
 require "scryer/rule_set"
@@ -13,7 +14,10 @@ require "scryer/dependency_audit"
 require "scryer/baseline"
 require "scryer/ai_client"
 require "scryer/fix_verifier"
+require "scryer/mechanical_fixer"
 require "scryer/ai_fix_suggester"
+require "scryer/fix_runner"
+require "scryer/dependency_fixer"
 
 Dir[File.join(__dir__, "scryer", "rules", "*.rb")].sort.each { |f| require f }
 Dir[File.join(__dir__, "scryer", "performance_rules", "*.rb")].sort.each { |f| require f }
@@ -39,11 +43,21 @@ module Scryer
     # default: every registered rule runs. The `scryer` executable's
     # `--skip RULE_ID` flag adds to this list for a single run rather than
     # replacing it.
-    attr_accessor :project_name, :dirs, :branch, :ai_client, :skip_rules
+    #
+    # `detect_duplicates` toggles duplicate-code detection (method/query/
+    # cache-key similarity across models, controllers, helpers, and
+    # concerns — see Scryer::DuplicateDetector) on or off. `true` by
+    # default, matching this gem's existing behavior. Duplicate detection
+    # isn't a `Scryer::Rule`, so it has no `rule_id` and `skip_rules` can't
+    # address it — set this to `false` instead (or pass `--no-duplicates` /
+    # `SCRYER_NO_DUPLICATES=1` for a single run without changing the
+    # configured default) if it's too noisy or too slow for a given project.
+    attr_accessor :project_name, :dirs, :branch, :ai_client, :skip_rules, :detect_duplicates
 
     def initialize
       @dirs = Scryer::Scanner::DEFAULT_GLOB_DIRS
       @skip_rules = []
+      @detect_duplicates = true
     end
   end
 
@@ -65,8 +79,8 @@ module Scryer
     # task aren't changed to use this (they also handle dependency auditing,
     # baselines, and report writing inline) — this is for callers that only
     # need the static-scan Result itself.
-    def scan(root:, dirs: configuration.dirs, skip_rules: configuration.skip_rules)
-      Scryer::Scanner.new(root: root, dirs: dirs, skip_rules: skip_rules).call
+    def scan(root:, dirs: configuration.dirs, skip_rules: configuration.skip_rules, detect_duplicates: configuration.detect_duplicates)
+      Scryer::Scanner.new(root: root, dirs: dirs, skip_rules: skip_rules, detect_duplicates: detect_duplicates).call
     end
   end
 end

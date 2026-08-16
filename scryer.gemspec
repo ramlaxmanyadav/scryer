@@ -4,12 +4,16 @@ Gem::Specification.new do |spec|
   spec.name        = "scryer"
   spec.version     = Scryer::VERSION
   spec.authors     = ["Ram Laxman Yadav"]
-  spec.summary     = "Ruby/Rails application security & risk auditor — tells you what to fix first."
+  spec.summary     = "An all-in-one security auditing and static analysis tool for Ruby on Rails " \
+                      "applications — tells you what to fix first, across security, performance, " \
+                      "dependencies, and code quality."
   spec.description = <<~DESC
-    Scryer scans a Ruby/Rails codebase for security vulnerabilities, performance problems,
-    dependency risk, and code-quality issues, then ranks everything it finds by severity across
-    all of those categories — so a scan ends with one answer to "what's most worth fixing," not
-    four separate reports to reconcile by hand. (Style/lint is RuboCop's job — Scryer doesn't
+    Scryer is an all-in-one security auditing and static analysis tool for Ruby on Rails
+    applications — tells you what to fix first, across security, performance, dependencies, and
+    code quality. It scans a Ruby/Rails codebase for security vulnerabilities, performance
+    problems, dependency risk, and code-quality issues, then ranks everything it finds by severity
+    across all of those categories — so a scan ends with one answer to "what's most worth fixing,"
+    not four separate reports to reconcile by hand. (Style/lint is RuboCop's job — Scryer doesn't
     touch that, except one narrow check.)
 
     Detects SQL injection, mass assignment, SSRF, path traversal, IDOR, insecure JWT/CORS/session
@@ -41,7 +45,7 @@ Gem::Specification.new do |spec|
     "rubygems_mfa_required" => "true"
   }
 
-  spec.files = Dir.glob("{lib,exe}/**/*") + %w[README.md CHANGELOG.md LICENSE.txt]
+  spec.files = Dir.glob("{lib,exe,docs}/**/*") + %w[README.md CHANGELOG.md LICENSE.txt]
   spec.bindir = "exe"
   spec.executables = ["scryer"]
   spec.require_paths = ["lib"]

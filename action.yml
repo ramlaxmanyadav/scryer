@@ -1,8 +1,8 @@
 name: 'Scryer Security & Risk Audit'
 description: >-
-  Run Scryer (a Ruby/Rails application security & risk auditor covering security,
-  performance, dependencies, and code quality) and upload SARIF results to GitHub
-  Code Scanning.
+  Run Scryer (an all-in-one security auditing and static analysis tool for Ruby on
+  Rails applications — tells you what to fix first, across security, performance,
+  dependencies, and code quality) and upload SARIF results to GitHub Code Scanning.
 author: 'Ram Laxman Yadav'
 
 branding:

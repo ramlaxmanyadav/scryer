@@ -1,8 +1,13 @@
-# Scryer
+# Scryer — Ruby on Rails Security Auditor
 
-> Scryer is a Ruby/Rails application security & risk auditor. It scans a Ruby/Rails codebase for
-> security vulnerabilities, performance problems, dependency risk, and code-quality issues, then
-> ranks everything it finds by severity *across* those categories — so a scan ends with one answer
+> Note: "Scryer" also names an unrelated AI/code-agent project elsewhere — this page is
+> specifically about the Ruby on Rails security auditing and static analysis gem.
+
+> Scryer is an all-in-one security auditing and static analysis tool for Ruby on Rails
+> applications — tells you what to fix first, across security, performance, dependencies, and
+> code quality. It scans a Ruby/Rails codebase for security vulnerabilities, performance
+> problems, dependency risk, and code-quality issues, then ranks everything it finds by
+> severity *across* those categories — so a scan ends with one answer
 > to "what's most worth fixing first," not four separate tool outputs to reconcile by hand.
 > Brakeman finds Rails security patterns very well (deeper taint/data-flow analysis than Scryer's
 > heuristics attempt to match); Scryer's job is different — turn security, performance,
@@ -18,12 +23,53 @@ analysis — see the comparison table in the README for what that tradeoff means
 
 ## Getting started
 
-- [README](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md): full documentation —
-  install, configuration, every CLI flag, all report formats, and how each feature works.
+- [README](https://github.com/ramlaxmanyadav/scryer/blob/main/README.md): the pitch, a real
+  example scan, an FAQ, and links to everything below — kept short on purpose.
+- [llms-full.txt](https://ramlaxmanyadav.github.io/scryer/llms-full.txt): this file plus the
+  complete content of the README and every docs/ page below, concatenated into one fetch — for
+  agents that prefer a single request over following links.
 - [gemspec](https://github.com/ramlaxmanyadav/scryer/blob/main/scryer.gemspec): gem metadata,
   version, and the zero-runtime-dependency design rationale.
 - [CHANGELOG](https://github.com/ramlaxmanyadav/scryer/blob/main/CHANGELOG.md): what's shipped in
   each version.
+
+## Documentation (docs/)
+
+The README is a landing page; full documentation lives in focused pages, each cross-linked from
+wherever it's relevant:
+
+- [Usage & Configuration](https://github.com/ramlaxmanyadav/scryer/blob/main/docs/usage.md):
+  install, running a scan, exit codes, CI/CD integration, what gets scanned, branch reporting,
+  skipping rules, baseline mode.
+- [What Scryer Detects](https://github.com/ramlaxmanyadav/scryer/blob/main/docs/rules.md): the
+  full rule list, example findings, report formats with real JSON/SARIF output, the dependency
+  audit.
+- [Fix Mode & AI-Assisted Fixes](https://github.com/ramlaxmanyadav/scryer/blob/main/docs/fix-mode.md):
+  `scryer verify`, `scryer fix` (mechanical no-AI fixes plus interactive review), optional
+  AI-rewritten suggestions.
+- [Architecture, Performance & Security Model](https://github.com/ramlaxmanyadav/scryer/blob/main/docs/architecture.md):
+  how it's built, real performance numbers, the security model, false-positive handling, the
+  accuracy benchmark, and the full comparison table vs. RuboCop/Brakeman/bundler-audit.
+- [Rails Integration](https://github.com/ramlaxmanyadav/scryer/blob/main/docs/rails-integration.md):
+  runtime query/authorization watchers, the `scryer:install` generator, testing Scryer's own
+  results in your app's test suite.
+- [Contributing & Releasing](https://github.com/ramlaxmanyadav/scryer/blob/main/docs/contributing.md):
+  how to add a new rule, and how this gem's own release process works.
+
+## Guides
+
+- [What is a Rails security scanner?](https://ramlaxmanyadav.github.io/scryer/rails-security-scanner.html):
+  SAST for Rails explained, what a scanner actually checks, and where Scryer sits among Brakeman,
+  RuboCop, and bundler-audit.
+- [Taint analysis vs. heuristic pattern matching](https://ramlaxmanyadav.github.io/scryer/taint-analysis-vs-heuristic-pattern-matching.html):
+  the honest engineering tradeoff behind Scryer's approach, with real Ruby examples of where each
+  one is right and wrong.
+- [Dependency security for Rails applications](https://ramlaxmanyadav.github.io/scryer/dependency-security.html):
+  what a `Gemfile.lock` audit actually needs to check, and why Scryer queries OSV.dev live instead
+  of shipping a bundled advisory database.
+- [Security code review checklist for Rails](https://ramlaxmanyadav.github.io/scryer/security-code-review-checklist.html):
+  a concrete, usable PR checklist, split by what a static analyzer can catch versus what still
+  needs a human.
 
 ## What makes it different: ranked, cross-category risk
 
@@ -113,9 +159,19 @@ ranks, at best, within its own domain.
   `bundle-audit check`).
 - `scryer -r PATH` — require a Ruby file before scanning, so `Scryer.configure` can run outside
   Rails.
-- `scryer verify --rule RULE_ID --file PATH` — re-runs one rule against one file (independent of a
-  full scan) to confirm a fix actually cleared the finding it targeted; exits 0 clean / 1 still
-  firing. `--list-rules` prints every known rule_id.
+- `scryer verify` — re-checks whether findings still fire, without writing a report. `--rule`/
+  `--file` narrow scope; omit either or both to broaden it (file-only: every rule on one file;
+  rule-only: one rule across the project; neither: everything). Exits 0 clean / 1 still firing.
+  `--list-rules` prints every known rule_id.
+- `scryer fix` (also `rails scryer:fix`) — the third leg of scan → fix → verify. Needs either an
+  `ai_client` configured or a matched finding covered by `Scryer::MechanicalFixer` (deterministic,
+  no-AI fixes for `frozen_string_literal`, `sql_injection`'s sole-argument case, and simple config
+  flips — opt-in for `frozen_string_literal` on an unscoped sweep). Writes to the real file only the
+  ones independently verified (via `Scryer::FixVerifier`) to actually clear the finding.
+  `--dry-run` previews without writing; `--rule`/`--file`/`--number`/`--list` scope it; `--yes`
+  skips the per-finding accept/skip/accept-all/skip-all review this command otherwise shows in an
+  interactive terminal. Anything not verified (or declined) is left alone and reported for manual
+  review, same as a normal scan would show it.
 - Full flag reference:
   [lib/scryer/cli.rb](https://github.com/ramlaxmanyadav/scryer/blob/main/lib/scryer/cli.rb).
 
