@@ -5,6 +5,20 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Security score changes: `info`-severity findings weighed too heavily — `SCORE_SEVERITY_WEIGHT["info"]`
+  dropped from `1` to `0.25` (critical stays `15`, warning stays `6`); an info finding is closer to
+  a cosmetic note than a real risk (e.g. `csrf_protection_disabled`'s narrowly-scoped-skip case), so
+  a codebase with only info-severity findings should barely move off 100/A even with several of
+  them. Performance findings (N+1 queries, missing pagination, etc.) now count toward the score too,
+  at a new `SCORE_CATEGORY_WEIGHT["performance"] = 0.2` — a fifth of security's weight at the same
+  severity/confidence, since a slow app is a real cost but not a *security* one; previously
+  performance findings were excluded from the score entirely. Duplicate-code groups and style
+  findings (`frozen_string_literal`) remain permanently excluded — a `DuplicateDetector::DuplicateGroup`
+  isn't backed by a `Finding` with a severity to weigh in the first place, and style findings are
+  cosmetic, not risk. No change to critical/warning weighting or confidence weighting. Covered by a
+  new `test/security_score_test.rb` (11 tests) — there was no prior test coverage of the score
+  formula at all.
+
 ## [1.2.0] - 2026-08-16
 
 - Added `c.detect_duplicates` (`Scryer::Configuration`, default `true`): duplicate-code detection

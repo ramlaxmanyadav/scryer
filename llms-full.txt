@@ -1452,9 +1452,11 @@ Security Score: 11/100 (F)
 The formula (`ReportRenderer#security_score` in `lib/scryer/report_renderer.rb`): every security
 and dependency finding costs points, weighted by both its severity *and* its confidence (a
 `low`-confidence `idor` finding costs less than a `high`-confidence `sql_injection` finding at the
-same severity), combined via exponential decay from 100 rather than linear subtraction — one
-critical finding visibly moves the score (100 → ~86) without a handful of findings driving any
-real app straight to a hard-clamped 0.
+same severity); performance findings cost points too, but at a fifth of that weight (a slow app is
+a real cost, just not a *security* one, so it nudges the score rather than driving it). Combined
+via exponential decay from 100 rather than linear subtraction — one critical finding visibly moves
+the score (100 → ~86) without a handful of findings driving any real app straight to a hard-clamped
+0.
 
 Two things worth being precise about before you treat this number as meaningful:
 
@@ -1463,9 +1465,12 @@ Two things worth being precise about before you treat this number as meaningful:
   exposure, not a rate. That makes it useful for tracking *one project's own trend* over time (did
   the next scan score higher or lower), not for comparing two differently-sized codebases against
   each other.
-- **Performance and code-quality findings aren't part of it.** This is a *security* score — only
-  security and dependency findings count. A slow app with clean security findings still scores
-  well here; check the "Performance"/"Code Quality" rows in the summary box separately for that.
+- **Code-quality findings are never part of it.** Duplicate-code groups and the one style check
+  (`frozen_string_literal`) are cosmetic, not risk, and stay out entirely — a duplicate-code group
+  isn't even backed by a `Finding` with a severity/confidence to weigh in the first place (see
+  `Scryer::DuplicateDetector`). Check the "Code Quality" row in the summary box separately for
+  that; performance findings, unlike code-quality ones, do count toward the score (lightly — see
+  above).
 
 Alongside the score, every scan also reports a **rule-level pass rate** — "how many of Scryer's
 registered checks fired zero findings":

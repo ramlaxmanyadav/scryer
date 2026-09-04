@@ -106,16 +106,21 @@ module Scryer
     end
 
     # A single 0-100 number (plus a letter grade) summarizing this scan's
-    # security risk exposure — security findings and dependency findings
-    # only (performance/code-quality findings aren't security risk, so
-    # they're deliberately excluded; a slow app doesn't lower a *security*
-    # score). Deliberately NOT normalized by files-scanned or lines of code:
-    # it reflects this scan's absolute finding exposure, so it's meaningful
-    # for tracking one project's trend over time (does the next scan score
-    # higher or lower), not for comparing two differently-sized codebases
-    # against each other — a bigger app with the same finding *density* will
-    # naturally score lower here, and that's a documented limitation, not a
-    # bug.
+    # security risk exposure — security findings and dependency findings at
+    # full weight, plus performance findings at a small fraction of that
+    # weight (a slow app is a real cost, just not a *security* one, so it
+    # nudges the score rather than driving it — see SCORE_CATEGORY_WEIGHT).
+    # Code-quality findings (duplicate-code groups, frozen_string_literal)
+    # are never part of this on purpose: a `DuplicateDetector::DuplicateGroup`
+    # isn't even a `Finding` (no severity/confidence to weigh in the first
+    # place — see duplicate_detector.rb), and style findings are cosmetic,
+    # not risk. Deliberately NOT normalized by files-scanned or lines of
+    # code: it reflects this scan's absolute finding exposure, so it's
+    # meaningful for tracking one project's trend over time (does the next
+    # scan score higher or lower), not for comparing two differently-sized
+    # codebases against each other — a bigger app with the same finding
+    # *density* will naturally score lower here, and that's a documented
+    # limitation, not a bug.
     #
     # Exponential decay rather than linear subtraction from 100: a single
     # critical/high finding should visibly move the score (100 -> ~86) without
@@ -123,11 +128,24 @@ module Scryer
     # which would make the score useless for comparing "bad" against "worse."
     # weighted_penalty combines severity (the dominant factor) with
     # confidence (a low-confidence rule's finding shouldn't hurt the score as
-    # much as a high-confidence one saying the same severity) — same
-    # philosophy as SARIF's `rank` (see sarif_rank above), computed once here
-    # for a single scan-level number instead of per-result.
-    SCORE_SEVERITY_WEIGHT = { "critical" => 15, "warning" => 6, "info" => 1 }.freeze
+    # much as a high-confidence one saying the same severity) and category —
+    # same philosophy as SARIF's `rank` (see sarif_rank above), computed once
+    # here for a single scan-level number instead of per-result.
+    # "info" is deliberately far below critical/warning, not just a step
+    # down from them — an info-severity finding is closer to a cosmetic
+    # note than a real risk (see e.g. csrf_protection_disabled's
+    # narrowly-scoped-skip case), so a codebase with only info findings
+    # should barely move off 100 even with a fair number of them, rather
+    # than accumulating like a smaller warning would.
+    SCORE_SEVERITY_WEIGHT = { "critical" => 15, "warning" => 6, "info" => 0.25 }.freeze
     SCORE_CONFIDENCE_WEIGHT = { "high" => 1.0, "medium" => 0.7, "low" => 0.4 }.freeze
+    # `category` is "security" for every Scryer::Finding in security_findings
+    # and every DependencyAudit::Finding (which has no `category` field at
+    # all — `f["category"]` is nil for those, so they fall through to the
+    # 1.0 default below, same full weight as security). "performance" is the
+    # only other category ever passed into this method's `findings` — style
+    # findings and duplicate-code groups never reach here at all (see above).
+    SCORE_CATEGORY_WEIGHT = { "security" => 1.0, "performance" => 0.2 }.freeze
     SCORE_DECAY_CONSTANT = 100.0
 
     # Deliberately reads @result/@dependency_findings directly rather than
@@ -140,10 +158,14 @@ module Scryer
       # (has "confidence") and DependencyAudit::Finding (doesn't — a plain
       # Hash returns nil for a missing key rather than raising, unlike
       # calling #confidence directly on a struct that has no such member).
-      findings = (@result.security_findings + @dependency_findings).map(&:to_h)
+      # style_findings/duplicate_groups are never included — see this
+      # method's doc comment above for why.
+      findings = (@result.security_findings + @result.performance_findings + @dependency_findings).map(&:to_h)
 
       weighted_penalty = findings.sum do |f|
-        (SCORE_SEVERITY_WEIGHT[f["severity"]] || 3) * (SCORE_CONFIDENCE_WEIGHT[f["confidence"]] || 0.7)
+        (SCORE_SEVERITY_WEIGHT[f["severity"]] || 3) *
+          (SCORE_CONFIDENCE_WEIGHT[f["confidence"]] || 0.7) *
+          (SCORE_CATEGORY_WEIGHT[f["category"]] || 1.0)
       end
 
       score = (100 * Math.exp(-weighted_penalty / SCORE_DECAY_CONSTANT)).round
@@ -368,7 +390,8 @@ module Scryer
           </div>
           <div class="score-details">
             <p class="score-label">Security Score — #{score["finding_count"]} security + dependency
-              finding(s), weighted by severity and this rule's confidence. Not normalized by app
+              + performance finding(s) (performance weighted far lighter than security), weighted
+              by severity and this rule's confidence. Not normalized by app
               size — see the README for what this number does and doesn't mean.
               <strong>#{clean_rate["clean"]}/#{clean_rate["total"]}</strong> rules clean
               (#{clean_rate["percent"]}%) — a rule-level pass rate, a different (and not always
@@ -399,7 +422,16 @@ module Scryer
       sec_counts = count_by_severity(security)
       perf_counts = count_by_severity(performance)
       style_counts = count_by_severity(style)
-      total_counts = SEVERITY_ORDER.each_with_object({}) { |s, acc| acc[s] = sec_counts[s] + perf_counts[s] + style_counts[s] }
+      # Dependency findings carry a real severity (see DependencyAudit::
+      # Finding#severity) same as any other finding — previously left out of
+      # this row (rendered as a "—" placeholder) and out of the Total row's
+      # sum below, which made the Total row silently undercount relative to
+      # what a reader would expect from a row literally labeled "Total" at
+      # the bottom of this same table, and inconsistent with the executive
+      # summary's severity bars above (which do include dependency findings
+      # in their own count).
+      deps_counts = count_by_severity(dependency_findings)
+      total_counts = SEVERITY_ORDER.each_with_object({}) { |s, acc| acc[s] = sec_counts[s] + perf_counts[s] + style_counts[s] + deps_counts[s] }
 
       header = "<tr><th>Category</th>" + SEVERITY_ORDER.map { |s| "<th>#{SEVERITY_LABELS[s]}</th>" }.join + "<th>Total</th></tr>"
       # Category rows link via the same search-filter mechanism as the OWASP
@@ -411,13 +443,20 @@ module Scryer
       perf_row = summary_row("Performance", perf_counts, filter_term: "performance")
       style_row = summary_row("Style", style_counts, filter_term: "style")
       # The Total row has no single category tag to filter by (it's the sum
-      # across all three), so its per-severity cells link straight to the
+      # across all four), so its per-severity cells link straight to the
       # matching #sev-* heading instead — same anchors, same precision, as
-      # the severity distribution chart at the top of the report.
+      # the severity distribution chart at the top of the report. Same
+      # caveat that chart's own comment already notes: #sev-* only groups
+      # security/performance/style findings, so a reader following this link
+      # for a severity that's only present via a dependency finding won't
+      # see it highlighted there — still the right destination for the bulk
+      # of what's counted, and dependency findings are one section away via
+      # the Dependency audit row's own link just below.
       total_row = summary_row("Total", total_counts, css_class: "total", severity_anchors: true)
       dup_row = "<tr><th>Duplicate code</th><td colspan=\"#{SEVERITY_ORDER.size}\">—</td>" \
                 "<td><a class=\"jump-link\" href=\"#duplicates\">#{duplicate_groups.size} group(s)</a></td></tr>"
-      deps_row = "<tr><th>Dependency audit</th><td colspan=\"#{SEVERITY_ORDER.size}\">—</td>" \
+      deps_cells = SEVERITY_ORDER.map { |s| "<td>#{deps_counts[s]}</td>" }.join
+      deps_row = "<tr><th>Dependency audit</th>#{deps_cells}" \
                  "<td><a class=\"jump-link\" href=\"#dependency-audit\">#{dependency_findings.size} finding(s)</a></td></tr>"
 
       "<table class=\"summary\">#{header}#{sec_row}#{perf_row}#{style_row}#{dup_row}#{deps_row}#{total_row}</table>"

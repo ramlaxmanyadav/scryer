@@ -108,7 +108,22 @@ module Scryer
             next unless in_specs
 
             name = Regexp.last_match(1)
-            version = Regexp.last_match(2)
+            # A platform-specific gem's lockfile spec line looks like
+            # "nokogiri (1.19.4-x86_64-linux-musl)" — Bundler appends the
+            # platform as a hyphen-separated suffix on the version itself.
+            # RubyGems version numbers (Gem::Version) never contain a
+            # hyphen — only dots — so a hyphen here always demarcates that
+            # suffix, never part of the version proper (including for
+            # prerelease gems, which use a dot: "1.0.0.pre1", not
+            # "1.0.0-pre1"). Left unstripped, this string gets sent
+            # straight to OSV.dev's version filter in vulnerable_gems,
+            # which parses "-x86_64-linux-musl" as a semver prerelease
+            # marker — sorting the version as *older* than the plain
+            # release and matching every advisory fixed at-or-before it as
+            # if it were still open. Confirmed directly against OSV.dev:
+            # querying nokogiri "1.19.4-x86_64-linux-musl" returns 8 vulns;
+            # querying "1.19.4" (the real, fully-patched version) returns 0.
+            version = Regexp.last_match(2).split("-", 2).first
             # A gem can legitimately appear under more than one block only
             # in pathological Gemfiles; last one wins, consistent with how
             # Bundler itself resolves a single spec per gem name.
