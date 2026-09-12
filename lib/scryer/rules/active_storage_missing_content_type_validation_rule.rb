@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `has_one_attached`/`has_many_attached :name` with no

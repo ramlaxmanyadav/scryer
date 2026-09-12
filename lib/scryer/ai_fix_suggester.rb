@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # Optional, opt-in enrichment of a finding's `suggested_fix` using an
   # external LLM. Every rule already ships a generic, human-reviewable

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags a controller's `index` action that queries a model directly
@@ -31,14 +32,6 @@ module Scryer
       self.confidence = "medium"
 
       UNSCOPED_METHODS = %w[all where].freeze
-      # Same list IdorRule/MassAssignmentRule use for the same reason —
-      # stdlib/gem constants with their own `.all`/`.where`-shaped methods
-      # that have nothing to do with an ActiveRecord model query.
-      NON_MODEL_RECEIVERS = %w[
-        Struct OpenStruct Data Class Module BCrypt OpenSSL Net URI Digest
-        JSON YAML Marshal String Array Hash Integer Float Symbol Comparable
-        Enumerable File Dir
-      ].freeze
 
       def scan
         findings = []
@@ -108,7 +101,7 @@ module Scryer
         const_name = const_receiver_name(receiver)
         return false unless const_name
 
-        !NON_MODEL_RECEIVERS.include?(const_name)
+        Ast.likely_model_name?(const_name, known_models: known_models, known_non_models: known_non_models)
       end
 
       def const_receiver_name(node)

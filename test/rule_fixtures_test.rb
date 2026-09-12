@@ -105,6 +105,22 @@ class RuleFixturesTest < Minitest::Test
       }
     },
 
+    "dangerous_eval" => {
+      rule_class: Scryer::Rules::DangerousEvalRule,
+      bad: {
+        file: "app/controllers/configurations_controller.rb",
+        source: <<~RUBY
+          eval(singular_instance)
+        RUBY
+      },
+      clean: {
+        file: "app/controllers/configurations_controller.rb",
+        source: <<~RUBY
+          eval("1 + 1")
+        RUBY
+      }
+    },
+
     "consider_all_requests_local_production" => {
       rule_class: Scryer::Rules::ConsiderAllRequestsLocalRule,
       bad: {

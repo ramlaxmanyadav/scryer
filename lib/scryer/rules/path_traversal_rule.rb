@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags a filesystem operation (`File.join/read/open/new/write/delete`,

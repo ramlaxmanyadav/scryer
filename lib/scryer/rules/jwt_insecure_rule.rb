@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags insecure usage of the `jwt` gem's `JWT.decode`/`JWT.encode`:

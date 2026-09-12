@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Opt-in RSpec integration — require this file yourself (e.g. `require
 # "scryer/rspec"` in spec_helper.rb) rather than it loading automatically
 # with the gem, since RSpec itself is never a Scryer runtime dependency (see

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `config.secret_key_base = "literal"` (or

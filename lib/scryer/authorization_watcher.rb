@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # Runtime companion to the static `idor`/`missing_authorization`/
   # `missing_policy_scope` rules — those can only ever say "no call to a

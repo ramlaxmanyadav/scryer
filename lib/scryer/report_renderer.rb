@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "json"
 require "time"
 
@@ -56,6 +57,9 @@ module Scryer
         "duplicate_groups" => @result.duplicate_groups.map { |g| duplicate_group_hash(g) },
         "dependency_findings" => @dependency_findings.map(&:to_h),
         "security_score" => security_score,
+        "performance_score" => performance_score,
+        "style_score" => style_score,
+        "dependency_score" => dependency_score,
         "rules_clean_rate" => rules_clean_rate
       }
     end
@@ -105,71 +109,84 @@ module Scryer
       counts.sort_by { |category, count| [-count, category] }
     end
 
-    # A single 0-100 number (plus a letter grade) summarizing this scan's
-    # security risk exposure — security findings and dependency findings at
-    # full weight, plus performance findings at a small fraction of that
-    # weight (a slow app is a real cost, just not a *security* one, so it
-    # nudges the score rather than driving it — see SCORE_CATEGORY_WEIGHT).
-    # Code-quality findings (duplicate-code groups, frozen_string_literal)
-    # are never part of this on purpose: a `DuplicateDetector::DuplicateGroup`
-    # isn't even a `Finding` (no severity/confidence to weigh in the first
-    # place — see duplicate_detector.rb), and style findings are cosmetic,
-    # not risk. Deliberately NOT normalized by files-scanned or lines of
-    # code: it reflects this scan's absolute finding exposure, so it's
-    # meaningful for tracking one project's trend over time (does the next
-    # scan score higher or lower), not for comparing two differently-sized
-    # codebases against each other — a bigger app with the same finding
-    # *density* will naturally score lower here, and that's a documented
-    # limitation, not a bug.
+    # Four independent 0-100 scores (each with its own letter grade) — one
+    # per category (security/performance/style/dependency) — rather than
+    # one blended number. A single combined score used to fold performance
+    # findings in at a diluted weight and drop style findings entirely,
+    # which meant a bad performance problem or a wall of style noise could
+    # never really move "the" score, and there was no way to see "how bad
+    # is *just* the security picture" without mentally subtracting the
+    # other categories back out. Each of the four methods below runs the
+    # exact same severity+confidence-weighted formula (see
+    # #category_score) against only that one category's own findings —
+    # nothing here dilutes or borrows weight from another category anymore.
+    #
+    # Deliberately NOT normalized by files-scanned or lines of code: each
+    # score reflects that category's absolute finding exposure in this
+    # scan, so it's meaningful for tracking one project's own trend over
+    # time (does the next scan score higher or lower), not for comparing
+    # two differently-sized codebases against each other — a bigger app
+    # with the same finding *density* will naturally score lower here, and
+    # that's a documented limitation, not a bug.
     #
     # Exponential decay rather than linear subtraction from 100: a single
-    # critical/high finding should visibly move the score (100 -> ~86) without
-    # a handful of findings driving a real app straight to a hard-clamped 0,
-    # which would make the score useless for comparing "bad" against "worse."
-    # weighted_penalty combines severity (the dominant factor) with
-    # confidence (a low-confidence rule's finding shouldn't hurt the score as
-    # much as a high-confidence one saying the same severity) and category —
-    # same philosophy as SARIF's `rank` (see sarif_rank above), computed once
-    # here for a single scan-level number instead of per-result.
+    # critical/high finding should visibly move a score (100 -> ~86)
+    # without a handful of findings driving a real app straight to a
+    # hard-clamped 0, which would make the score useless for comparing
+    # "bad" against "worse." weighted_penalty combines severity (the
+    # dominant factor) with confidence (a low-confidence rule's finding
+    # shouldn't hurt the score as much as a high-confidence one saying the
+    # same severity) — same philosophy as SARIF's `rank` (see sarif_rank
+    # above), computed once per category instead of per-result.
     # "info" is deliberately far below critical/warning, not just a step
     # down from them — an info-severity finding is closer to a cosmetic
     # note than a real risk (see e.g. csrf_protection_disabled's
-    # narrowly-scoped-skip case), so a codebase with only info findings
+    # narrowly-scoped-skip case), so a category with only info findings
     # should barely move off 100 even with a fair number of them, rather
     # than accumulating like a smaller warning would.
     SCORE_SEVERITY_WEIGHT = { "critical" => 15, "warning" => 6, "info" => 0.25 }.freeze
     SCORE_CONFIDENCE_WEIGHT = { "high" => 1.0, "medium" => 0.7, "low" => 0.4 }.freeze
-    # `category` is "security" for every Scryer::Finding in security_findings
-    # and every DependencyAudit::Finding (which has no `category` field at
-    # all — `f["category"]` is nil for those, so they fall through to the
-    # 1.0 default below, same full weight as security). "performance" is the
-    # only other category ever passed into this method's `findings` — style
-    # findings and duplicate-code groups never reach here at all (see above).
-    SCORE_CATEGORY_WEIGHT = { "security" => 1.0, "performance" => 0.2 }.freeze
     SCORE_DECAY_CONSTANT = 100.0
 
-    # Deliberately reads @result/@dependency_findings directly rather than
-    # going through as_hash — as_hash includes this method's own output (so
-    # JSON consumers get the score without a separate call), and as_hash
-    # calling security_score while security_score called as_hash would
-    # recurse forever.
     def security_score
+      category_score(@result.security_findings)
+    end
+
+    def performance_score
+      category_score(@result.performance_findings)
+    end
+
+    # Duplicate-code groups are deliberately excluded from this (and so
+    # from every score) — a `DuplicateDetector::DuplicateGroup` isn't even
+    # a `Finding` (no severity/confidence to weigh in the first place; see
+    # duplicate_detector.rb) — so this is really just `frozen_string_literal`
+    # today, the one style check this gem has.
+    def style_score
+      category_score(@result.style_findings)
+    end
+
+    def dependency_score
+      category_score(@dependency_findings)
+    end
+
+    # Shared by all four *_score methods above. Deliberately takes the raw
+    # findings array rather than going through as_hash — as_hash includes
+    # every score's own output (so JSON consumers get all four without a
+    # separate call), and as_hash calling a *_score method while that
+    # method called as_hash would recurse forever.
+    def category_score(findings)
       # .to_h (not the full as_hash) so this works uniformly across Finding
       # (has "confidence") and DependencyAudit::Finding (doesn't — a plain
       # Hash returns nil for a missing key rather than raising, unlike
       # calling #confidence directly on a struct that has no such member).
-      # style_findings/duplicate_groups are never included — see this
-      # method's doc comment above for why.
-      findings = (@result.security_findings + @result.performance_findings + @dependency_findings).map(&:to_h)
+      hashes = findings.map(&:to_h)
 
-      weighted_penalty = findings.sum do |f|
-        (SCORE_SEVERITY_WEIGHT[f["severity"]] || 3) *
-          (SCORE_CONFIDENCE_WEIGHT[f["confidence"]] || 0.7) *
-          (SCORE_CATEGORY_WEIGHT[f["category"]] || 1.0)
+      weighted_penalty = hashes.sum do |f|
+        (SCORE_SEVERITY_WEIGHT[f["severity"]] || 3) * (SCORE_CONFIDENCE_WEIGHT[f["confidence"]] || 0.7)
       end
 
       score = (100 * Math.exp(-weighted_penalty / SCORE_DECAY_CONSTANT)).round
-      { "score" => score, "grade" => score_grade(score), "finding_count" => findings.size }
+      { "score" => score, "grade" => score_grade(score), "finding_count" => hashes.size }
     end
 
     SCORE_GRADE_BANDS = [[90, "A"], [80, "B"], [70, "C"], [60, "D"]].freeze
@@ -183,10 +200,12 @@ module Scryer
     # (security + performance + style; NOT the dependency checks, which
     # aren't backed by a Rule subclass at all — see DEPENDENCY_SARIF_RULES)
     # fired zero findings in this scan, out of every rule that exists to
-    # fire. A rule-level pass rate, distinct from security_score (which is
-    # finding-weighted, not rule-counted) — a codebase can have a high clean
-    # rate (few distinct rules triggered) and still a low score (the few
-    # that did trigger were severe/high-confidence), or the reverse (many
+    # fire. A single rule-level pass rate spanning all three rule-backed
+    # categories together, distinct from the four *_score methods above
+    # (each of which is finding-weighted, not rule-counted, and scoped to
+    # one category) — a codebase can have a high clean rate (few distinct
+    # rules triggered) and still a low score in one category (the few that
+    # did trigger there were severe/high-confidence), or the reverse (many
     # different rules each firing once, none of them serious). Report both;
     # neither alone tells the whole story.
     def rules_clean_rate
@@ -251,14 +270,18 @@ module Scryer
           <style>#{CSS}</style>
         </head>
         <body>
-          <h1>Scryer report</h1>
-          <p class="meta">
-            #{escape(@project_name)} &middot; #{escape(h["release_label"] || "no release label")} &middot;
-            #{escape(h["scanned_at"])} &middot; #{h["files_scanned"]} files scanned
-            #{h["parse_errors"].any? ? "&middot; <span class=\"crit\">#{h["parse_errors"].size} parse error(s)</span>" : ""}
-          </p>
+          <header class="hero">
+            <h1>Scryer report</h1>
+            <p class="meta">
+              <span class="meta-item meta-project">#{escape(@project_name)}</span>
+              <span class="meta-item">#{escape(h["release_label"] || "no release label")}</span>
+              <span class="meta-item">#{escape(h["scanned_at"])}</span>
+              <span class="meta-item">#{h["files_scanned"]} files scanned</span>
+              #{h["parse_errors"].any? ? "<span class=\"meta-item crit\">#{h["parse_errors"].size} parse error(s)</span>" : ""}
+            </p>
+          </header>
 
-          #{render_executive_summary(h, h["security_score"], h["rules_clean_rate"])}
+          #{render_executive_summary(h, h["rules_clean_rate"])}
 
           #{render_toc(h)}
 
@@ -347,14 +370,13 @@ module Scryer
       HTML
     end
 
-    # The score badge + severity bar chart at the very top of the report —
-    # an "is this bad or fine" answer in the first thing a reader sees,
-    # ahead of even the table of contents. Scoped to security + dependency
-    # findings only, same as ReportRenderer#security_score itself
-    # (performance/code-quality findings aren't part of the security score,
-    # so they're not part of this chart either — the Summary table further
-    # down still shows those breakdowns).
-    def render_executive_summary(h, score, clean_rate)
+    # The four score badges + severity bar chart at the very top of the
+    # report — an "is this bad or fine" answer in the first thing a reader
+    # sees, ahead of even the table of contents. The bar chart itself stays
+    # scoped to security + dependency findings (the two categories a
+    # "should I be worried" skim cares about most) — the Summary table
+    # further down shows the performance/style breakdown too.
+    def render_executive_summary(h, clean_rate)
       sec_and_deps = h["security_findings"] + h["dependency_findings"]
       by_severity = Hash.new(0)
       sec_and_deps.each { |f| by_severity[f["severity"]] += 1 }
@@ -382,20 +404,41 @@ module Scryer
         BAR
       end.join
 
+      score_badges = [
+        ["Security", h["security_score"]],
+        ["Performance", h["performance_score"]],
+        ["Style", h["style_score"]],
+        ["Dependency", h["dependency_score"]]
+      ].map do |label, score|
+        <<~BADGE
+          <div class="score-badge-item">
+            <div class="score-badge grade-#{score["grade"]}">
+              <span class="score-number">#{score["score"]}</span>
+              <span class="score-grade">#{score["grade"]}</span>
+            </div>
+            <span class="score-category">#{label}</span>
+          </div>
+        BADGE
+      end.join
+
       <<~HTML
         <div class="score-panel">
-          <div class="score-badge grade-#{score["grade"]}">
-            <span class="score-number">#{score["score"]}</span>
-            <span class="score-grade">#{score["grade"]}</span>
+          <div class="score-badges">
+            #{score_badges}
           </div>
+          <div class="score-panel-divider"></div>
           <div class="score-details">
-            <p class="score-label">Security Score — #{score["finding_count"]} security + dependency
-              + performance finding(s) (performance weighted far lighter than security), weighted
-              by severity and this rule's confidence. Not normalized by app
-              size — see the README for what this number does and doesn't mean.
+            <p class="score-label">Four independent scores, one per category — Security
+              (#{h["security_score"]["finding_count"]} finding(s)), Performance
+              (#{h["performance_score"]["finding_count"]}), Style
+              (#{h["style_score"]["finding_count"]}), and Dependency audit
+              (#{h["dependency_score"]["finding_count"]}) — each weighted by severity and
+              confidence within its own category only, so a bad performance problem or a wall of
+              style findings can't hide inside (or get diluted by) a security number. Not
+              normalized by app size — see the README for what these numbers do and don't mean.
               <strong>#{clean_rate["clean"]}/#{clean_rate["total"]}</strong> rules clean
               (#{clean_rate["percent"]}%) — a rule-level pass rate, a different (and not always
-              matching) signal from the finding-weighted score.</p>
+              matching) signal from the finding-weighted scores.</p>
             #{bars}
           </div>
         </div>
@@ -1008,35 +1051,54 @@ module Scryer
     end
 
     CSS = <<~CSS
-      body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 2rem; color: #1e293b; }
-      h1 { margin-bottom: 0.25rem; }
-      h2 { margin-top: 2rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.35rem; }
-      .meta { color: #64748b; font-size: 0.875rem; margin-top: 0; }
-      .crit { color: #b91c1c; font-weight: 600; }
-      .score-panel { display: flex; gap: 1.5rem; align-items: center; background: #f8fafc;
-        border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.25rem 1.5rem; margin: 1rem 0 1.25rem; }
-      .score-badge { flex: 0 0 auto; width: 5.5rem; height: 5.5rem; border-radius: 50%;
+      :root {
+        --ink: #0f172a; --muted: #64748b; --border: #e2e8f0; --surface: #ffffff; --canvas: #f6f8fb;
+      }
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        margin: 0; padding: 2.5rem clamp(1.25rem, 4vw, 3rem) 3rem; color: var(--ink); background: var(--canvas); }
+      h1 { margin: 0 0 0.4rem; font-size: 1.9rem; font-weight: 800; letter-spacing: -0.02em; }
+      h2 { margin-top: 2.75rem; font-size: 1.05rem; font-weight: 700; border-bottom: 1px solid var(--border);
+        padding-bottom: 0.5rem; }
+      .hero { margin-bottom: 1.5rem; }
+      .meta { color: var(--muted); font-size: 0.85rem; margin: 0; display: flex; flex-wrap: wrap;
+        gap: 0.35rem 0; }
+      .meta-item + .meta-item::before { content: "\\00b7"; margin: 0 0.55rem; color: #cbd5e1; }
+      .crit { color: #b91c1c; font-weight: 700; }
+      .score-panel { display: flex; gap: 2rem; align-items: center; flex-wrap: wrap; background: var(--surface);
+        border: 1px solid var(--border); border-radius: 16px; padding: 1.75rem 2rem; margin: 1.25rem 0 1.75rem;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 12px 28px -16px rgba(15, 23, 42, 0.12); }
+      .score-badges { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+      .score-panel-divider { align-self: stretch; width: 1px; background: var(--border); }
+      .score-badge-item { display: flex; flex-direction: column; align-items: center; gap: 0.55rem; }
+      .score-category { font-size: 0.68rem; font-weight: 700; color: var(--muted); text-transform: uppercase;
+        letter-spacing: 0.06em; }
+      .score-badge { flex: 0 0 auto; width: 5rem; height: 5rem; border-radius: 20px;
         display: flex; flex-direction: column; align-items: center; justify-content: center;
-        color: #fff; }
-      .score-badge .score-number { font-size: 1.5rem; font-weight: 700; line-height: 1; }
-      .score-badge .score-grade { font-size: 0.9rem; font-weight: 600; opacity: 0.9; }
-      .score-badge.grade-A { background: #16a34a; }
-      .score-badge.grade-B { background: #0891b2; }
-      .score-badge.grade-C { background: #d97706; }
-      .score-badge.grade-D { background: #ea580c; }
-      .score-badge.grade-F { background: #dc2626; }
-      .score-details { flex: 1 1 auto; min-width: 0; }
-      .score-label { margin: 0 0 0.6rem; font-size: 0.82rem; color: #475569; }
-      .score-bar-row { display: flex; align-items: center; gap: 0.6rem; font-size: 0.8rem; margin: 0.25rem 0; }
-      .score-bar-label { flex: 0 0 4.5rem; color: #475569; }
-      .score-bar-track { flex: 1 1 auto; background: #e2e8f0; border-radius: 999px; height: 0.6rem; overflow: hidden; }
+        color: #fff; box-shadow: 0 6px 14px -6px rgba(15, 23, 42, 0.35); }
+      .score-badge .score-number { font-size: 1.45rem; font-weight: 800; line-height: 1; }
+      .score-badge .score-grade { font-size: 0.7rem; font-weight: 700; opacity: 0.9; margin-top: 0.15rem; }
+      .score-badge.grade-A { background: linear-gradient(155deg, #4ade80, #15803d); }
+      .score-badge.grade-B { background: linear-gradient(155deg, #22d3ee, #0e7490); }
+      .score-badge.grade-C { background: linear-gradient(155deg, #fbbf24, #b45309); }
+      .score-badge.grade-D { background: linear-gradient(155deg, #fb923c, #c2410c); }
+      .score-badge.grade-F { background: linear-gradient(155deg, #f87171, #b91c1c); }
+      .score-details { flex: 1 1 18rem; min-width: 0; }
+      .score-label { margin: 0 0 0.85rem; font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+      .score-bar-row { display: grid; grid-template-columns: 5rem 1fr 2.25rem; align-items: center; gap: 0.75rem;
+        font-size: 0.8rem; margin: 0.4rem 0; }
+      .score-bar-label { color: var(--muted); font-weight: 600; }
+      .score-bar-track { background: #eef1f6; border-radius: 999px; height: 0.55rem; overflow: hidden; }
       .score-bar-fill { height: 100%; border-radius: 999px; }
-      .score-bar-fill.critical { background: #dc2626; }
-      .score-bar-fill.warning { background: #d97706; }
-      .score-bar-fill.info { background: #64748b; }
-      .score-bar-count { flex: 0 0 1.75rem; text-align: right; color: #1e293b; font-weight: 600;
+      .score-bar-fill.critical { background: linear-gradient(90deg, #f87171, #dc2626); }
+      .score-bar-fill.warning { background: linear-gradient(90deg, #fbbf24, #d97706); }
+      .score-bar-fill.info { background: #94a3b8; }
+      .score-bar-count { text-align: right; color: var(--ink); font-weight: 700;
         text-decoration: none; }
       .score-bar-count:hover { text-decoration: underline; }
+      @media (max-width: 640px) {
+        .score-panel { flex-direction: column; align-items: stretch; }
+        .score-panel-divider { display: none; }
+      }
       .findings-search { display: block; width: 100%; max-width: 28rem; margin: 0.75rem 0 1.25rem;
         padding: 0.5rem 0.75rem; font: inherit; font-size: 0.85rem; border: 1px solid #cbd5e1;
         border-radius: 8px; box-sizing: border-box; }

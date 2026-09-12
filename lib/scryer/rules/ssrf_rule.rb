@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags an outbound HTTP call (`Net::HTTP`, `URI.open`/bare `open`

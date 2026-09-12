@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # This gem runs on-demand via a rake task, not as request-cycle
   # instrumentation — so the Railtie doesn't need to hook into the

@@ -1,4 +1,6 @@
+# frozen_string_literal: true
 require "ripper"
+require "set"
 
 module Scryer
   # Small set of helpers for walking the S-expression tree that Ripper.sexp
@@ -320,6 +322,57 @@ module Scryer
       return nil unless tagged?(node, :var_ref) && node[1].is_a?(Array) && node[1][0] == :@kw
 
       node[1][1]
+    end
+
+    # Shared by MassAssignmentRule/IdorRule/MissingPolicyScopeRule — every
+    # one of them needs "is this bare constant receiver likely an
+    # ActiveRecord model" and, until this method existed, each rule
+    # answered it with its own copy of a purely name-based guess (an exact
+    # exclusion list of stdlib/gem constants with their own `.new`/`.find`/
+    # `.where`-shaped methods). That guess had a real, reported false
+    # positive: a plain Ruby service/command object — `Server.new(params)
+    # .call`, the well-known "interactor" pattern — looks syntactically
+    # identical to `Order.new(params)`, and no fixed exclusion list can
+    # anticipate every project's own naming convention for that pattern.
+    #
+    # `known_models`/`known_non_models` (both Sets of unqualified, last-
+    # segment class names — see Scanner#call, which builds them once per
+    # scan by walking every `class X < Y` declaration across every scanned
+    # file) give this a real, Brakeman-like signal instead of a guess,
+    # whenever the receiver's class is actually declared somewhere in the
+    # project: `known_models` wins outright (a model genuinely named
+    # e.g. `Command` still gets flagged), and `known_non_models` (a class
+    # declared with literally no superclass, or with a superclass matching
+    # NON_MODEL_SUPERCLASS_PATTERN below — neither shape an ActiveRecord
+    # model ever has) excludes it outright regardless of name. Only when
+    # neither set has an answer (the class isn't declared anywhere Scryer
+    # scanned — a gem-provided constant, or `c.dirs` not covering it) does
+    # this fall back to the same purely-name-based guessing as before:
+    # NON_MODEL_RECEIVER_NAMES (stdlib/gem constants) and
+    # NON_MODEL_RECEIVER_SUFFIXES (a project's own service/command objects,
+    # covering the common "Service"/"Interactor"/etc. conventions when the
+    # class itself wasn't visible to this scan). Defaults (assume it likely
+    # *is* a model) when none of the above says otherwise — same
+    # false-positive-favoring direction as every other heuristic in this
+    # gem: a missed real mass-assignment/IDOR finding is worse than an
+    # occasional nudge to double-check a service object.
+    NON_MODEL_RECEIVER_NAMES = %w[
+      Struct OpenStruct Data Class Module BCrypt OpenSSL Net URI Digest
+      JSON YAML Marshal String Array Hash Integer Float Symbol Comparable
+      Enumerable File Dir
+    ].freeze
+
+    NON_MODEL_RECEIVER_SUFFIXES = %w[Service Server Interactor Operation Command UseCase].freeze
+
+    EMPTY_SET = Set.new.freeze
+
+    def likely_model_name?(const_name, known_models: EMPTY_SET, known_non_models: EMPTY_SET)
+      return true if known_models.include?(const_name)
+      return false if known_non_models.include?(const_name)
+      return false if NON_MODEL_RECEIVER_NAMES.include?(const_name)
+      return false if NON_MODEL_RECEIVER_SUFFIXES.any? { |suffix| const_name.end_with?(suffix) }
+
+      true
     end
 
     # True if `node` is `params`, `params[:x]`, or contains such a reference

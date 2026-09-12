@@ -9,6 +9,13 @@
 * SQL injection
 * Mass assignment
 * Command injection
+* Dangerous `eval` (`eval`/`instance_eval`/`class_eval`/`module_eval` called with anything other
+  than a hardcoded string literal) — broader than most other checks here: it fires on any
+  non-literal argument, not just one tracing back to `params`, since there's essentially no
+  legitimate reason for an eval-family argument to be anything else. Always `critical` severity;
+  confidence is `high` when `params` is directly visible in the argument, `medium` otherwise (the
+  closest signal available without real data-flow tracing — same axis Brakeman's own "Dangerous
+  Eval" check varies High/Weak confidence on)
 * Hardcoded secrets (and hardcoded HTTP Basic Auth credentials)
 * Unsafe deserialization
 * XSS-prone HTML
@@ -157,7 +164,7 @@ Generate detailed JSON or self-contained HTML reports:
 scryer -o report.json -o report.html
 ```
 
-The HTML report leads with a [security score](./architecture.md#security-score) badge and a severity distribution
+The HTML report leads with four [score](./architecture.md#scores) badges and a severity distribution
 chart, then Overview/Summary/OWASP coverage, collapsed-by-default reference tables (every rule
 that *can* fire, not a wall of always-expanded detail), and the Findings section itself — Top
 priorities first, then a text filter box (rule/file/message, no page reload) above the full

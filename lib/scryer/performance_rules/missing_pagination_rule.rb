@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module PerformanceRules
     # Flags a controller `index` action that loads `Model.all` or a bare

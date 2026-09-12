@@ -152,7 +152,7 @@ end
 `Scryer.scan(root:)` runs the same static scan `scryer:report`/the `scryer` executable do (using
 `c.dirs`/`c.skip_rules` from your initializer), without needing a report written to disk —
 `have_no_critical_findings`/`assert_no_critical_scryer_findings` only look at *security* findings
-(same scoping as the [security score](./architecture.md#security-score)); `have_no_findings_for`/
+(same scoping as the [Security Score](./architecture.md#scores)); `have_no_findings_for`/
 `assert_no_scryer_findings_for` check a specific `rule_id` across all three static categories,
 for pinning a specific bug so it can't come back unnoticed. This talks to the live filesystem on
 every test run (a real `Ripper`-based scan, same cost as running `scryer` itself) — for a large app

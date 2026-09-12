@@ -1,13 +1,14 @@
+# frozen_string_literal: true
 require "optparse"
 require "fileutils"
-require "shellwords"
+require "open3"
 
 module Scryer
   # Backs the `scryer` executable (see exe/scryer) — a standalone,
   # Rails-free way to run a scan, mirroring `brakeman -o report.json`.
-  # Deliberately separate from lib/scryer.rb: OptionParser/Shellwords are
-  # only needed for this CLI entry point, not when the gem is required
-  # inside a host app.
+  # Deliberately separate from lib/scryer.rb: OptionParser/Open3 are only
+  # needed for this CLI entry point, not when the gem is required inside a
+  # host app.
   class CLI
     EXTENSION_FORMATS = { ".json" => "json", ".html" => "html", ".htm" => "html", ".csv" => "csv", ".sarif" => "sarif" }.freeze
 
@@ -85,9 +86,9 @@ module Scryer
       renderer = ReportRenderer.new(
         result: result,
         project_name: options[:project_name] || File.basename(root),
-        release_label: git(root, "describe --tags --always"),
-        git_commit_sha: git(root, "rev-parse HEAD"),
-        git_branch: options[:branch] || git(root, "rev-parse --abbrev-ref HEAD"),
+        release_label: git(root, "describe", "--tags", "--always"),
+        git_commit_sha: git(root, "rev-parse", "HEAD"),
+        git_branch: options[:branch] || git(root, "rev-parse", "--abbrev-ref", "HEAD"),
         dependency_findings: dependency_findings
       )
 
@@ -192,7 +193,6 @@ module Scryer
       ]
 
       divider = paint("─" * 32, :gray)
-      score = renderer.security_score
       @stdout.puts ""
       @stdout.puts paint("Scryer Audit — #{result.files_scanned} files scanned", :bold)
       @stdout.puts divider
@@ -203,7 +203,10 @@ module Scryer
         @stdout.puts ""
       end
       clean_rate = renderer.rules_clean_rate
-      @stdout.puts "Security Score: #{score["score"]}/100 (#{paint_grade(score["grade"], score["grade"])})"
+      @stdout.puts score_row("Security Score", renderer.security_score)
+      @stdout.puts score_row("Performance Score", renderer.performance_score)
+      @stdout.puts score_row("Style Score", renderer.style_score)
+      @stdout.puts(ran_deps ? score_row("Dependency Score", renderer.dependency_score) : "#{"Dependency Score".ljust(20)}skipped (--no-deps)")
       @stdout.puts "Checks: #{clean_rate["clean"]}/#{clean_rate["total"]} rules clean (#{clean_rate["percent"]}%)"
       @stdout.puts ""
       rows.each { |label, count| @stdout.puts summary_row(label, count) }
@@ -218,6 +221,10 @@ module Scryer
     def summary_row(label, count)
       value = count.nil? ? "skipped (--no-deps)" : "#{count} finding#{"s" unless count == 1}"
       "#{label.ljust(14)}#{value.rjust(20)}"
+    end
+
+    def score_row(label, score)
+      "#{label.ljust(20)}#{score["score"]}/100 (#{paint_grade(score["grade"], score["grade"])})"
     end
 
     # The categories above are counted separately, but nothing else ranks
@@ -917,8 +924,9 @@ module Scryer
       [File.join(dir, "scryer_report.json"), File.join(dir, "scryer_report.html")]
     end
 
-    def git(root, cmd)
-      output = `git -C #{Shellwords.escape(root)} #{cmd} 2>/dev/null`.strip
+    def git(root, *cmd)
+      output, = Open3.capture3("git", "-C", root, *cmd)
+      output = output.strip
       output.empty? ? nil : output
     rescue StandardError
       nil

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags Ruby files with no `# frozen_string_literal: true` magic comment

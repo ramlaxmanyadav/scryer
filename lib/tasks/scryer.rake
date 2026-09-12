@@ -440,7 +440,6 @@ module ScryerTasks
     ]
 
     divider = paint("─" * 32, :gray)
-    score = renderer.security_score
     puts ""
     puts paint("Scryer Audit — #{result.files_scanned} files scanned", :bold)
     puts divider
@@ -450,7 +449,10 @@ module ScryerTasks
       puts ""
     end
     clean_rate = renderer.rules_clean_rate
-    puts "Security Score: #{score["score"]}/100 (#{paint_grade(score["grade"], score["grade"])})"
+    puts score_row("Security Score", renderer.security_score)
+    puts score_row("Performance Score", renderer.performance_score)
+    puts score_row("Style Score", renderer.style_score)
+    puts(ran_deps ? score_row("Dependency Score", renderer.dependency_score) : "#{"Dependency Score".ljust(20)}skipped (nodeps)")
     puts "Checks: #{clean_rate["clean"]}/#{clean_rate["total"]} rules clean (#{clean_rate["percent"]}%)"
     puts ""
     rows.each { |label, count| puts summary_row(label, count) }
@@ -465,6 +467,10 @@ module ScryerTasks
   def summary_row(label, count)
     value = count.nil? ? "skipped (nodeps)" : "#{count} finding#{"s" unless count == 1}"
     "#{label.ljust(14)}#{value.rjust(20)}"
+  end
+
+  def score_row(label, score)
+    "#{label.ljust(20)}#{score["score"]}/100 (#{paint_grade(score["grade"], score["grade"])})"
   end
 
   # The categories above are counted separately, but nothing else ranks

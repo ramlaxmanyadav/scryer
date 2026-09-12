@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `Model.find(params[...])` / `Model.find_by(...params...)` inside
@@ -26,15 +27,6 @@ module Scryer
       self.confidence = "low"
 
       FINDER_METHODS = %w[find find_by find_by!].freeze
-
-      # Same reasoning as MassAssignmentRule::NON_MODEL_RECEIVERS: common
-      # stdlib/gem constants with their own `.find`-style methods that have
-      # nothing to do with an ActiveRecord model lookup.
-      NON_MODEL_RECEIVERS = %w[
-        Struct OpenStruct Data Class Module BCrypt OpenSSL Net URI Digest
-        JSON YAML Marshal String Array Hash Integer Float Symbol Comparable
-        Enumerable File Dir
-      ].freeze
 
       # Pundit's `authorize`/`policy_scope`/`can?`/`cannot?` plus two more
       # well-established framework-provided safeguards, deliberately not an
@@ -140,17 +132,17 @@ module Scryer
       # namespaced model's `.find(params[...])` was silently never examined
       # at all (a false negative, not a false positive — worth fixing since
       # namespacing under a module is an extremely common Rails convention).
-      # Checked against the *last* segment (`"Post"`, not `"Admin"`), same
-      # exclusion list either way — none of NON_MODEL_RECEIVERS are commonly
-      # used in namespaced form for this purpose, but checking the actual
-      # class name being looked up is the more correct match regardless.
+      # Checked against the *last* segment (`"Post"`, not `"Admin"`) — same
+      # last-segment matching Scanner's known_models/known_non_models
+      # already use (see Ast.likely_model_name?), so a namespaced model
+      # resolves consistently either way.
       def likely_model_receiver?(receiver)
         return false if receiver.nil? # bare find(...) inside the model itself, not a controller lookup
 
         const_name = const_receiver_name(receiver)
         return false unless const_name
 
-        !NON_MODEL_RECEIVERS.include?(const_name)
+        Ast.likely_model_name?(const_name, known_models: known_models, known_non_models: known_non_models)
       end
 
       def const_receiver_name(node)

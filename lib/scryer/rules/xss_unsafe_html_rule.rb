@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `.html_safe` and `raw(...)` calls on anything that isn't an

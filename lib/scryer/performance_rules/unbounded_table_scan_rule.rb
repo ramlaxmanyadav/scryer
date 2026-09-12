@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module PerformanceRules
     # Flags `Model.all.each`/`Model.where(...).each` (or `.order(...).each`) —
@@ -9,6 +10,11 @@ module Scryer
     # assigned from the query and iterated later (that pattern is out of scope
     # here; see `NPlusOneQueryRule`, which does track simple local
     # assignments, for a related check on what happens *inside* such a loop).
+    # The receiver constant is checked against known_models/known_non_models
+    # (see Ast.likely_model_name?) rather than accepted unconditionally — a
+    # bare Ruby module/class with no AR ancestry (e.g. this gem's own
+    # `RuleSet.all.each`) can coincidentally match the same `Const.all.each`
+    # shape without being a query at all.
     class UnboundedTableScanRule < Rule
       self.rule_id = "unbounded_table_scan"
       self.category = "performance"
@@ -61,7 +67,9 @@ module Scryer
         return false unless Ast.tagged?(root, :var_ref, :vcall)
 
         const = root[1]
-        const.is_a?(Array) && const[0] == :@const
+        return false unless const.is_a?(Array) && const[0] == :@const
+
+        Ast.likely_model_name?(const[1], known_models: known_models, known_non_models: known_non_models)
       end
 
       def root_of(node)

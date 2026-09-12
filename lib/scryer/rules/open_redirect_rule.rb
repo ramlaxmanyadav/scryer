@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `redirect_to` called with `params[...]` (or plain `params`)

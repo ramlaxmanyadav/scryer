@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `SomeJob.perform_async(...)` / `.perform_later(...)` /

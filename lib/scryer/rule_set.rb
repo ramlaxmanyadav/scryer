@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # Registry of every Rule subclass (rules self-register via Rule.inherited).
   # Scanner uses .all to run every registered rule against each parsed file.

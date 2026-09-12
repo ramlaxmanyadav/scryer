@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `config.force_ssl = false` — an explicit opt-out of Rails'

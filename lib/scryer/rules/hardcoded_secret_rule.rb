@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags plain string literals assigned to a constant/variable/hash-key

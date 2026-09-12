@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Configuration for the scryer gem (static code analysis: security,
 # duplicate code, performance heuristics). Run `bin/rails scryer:report`
 # to scan this app and generate tmp/scryer_report.{json,html} locally.

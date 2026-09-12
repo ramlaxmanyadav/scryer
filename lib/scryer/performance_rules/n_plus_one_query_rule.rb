@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module PerformanceRules
     # Flags likely N+1 queries: inside a `.each`/`.map` block whose receiver
@@ -111,6 +112,7 @@ module Scryer
 
         const = root[1]
         return false unless const.is_a?(Array) && const[0] == :@const
+        return false unless Ast.likely_model_name?(const[1], known_models: known_models, known_non_models: known_non_models)
 
         Ast.each_node(value).any? do |n|
           next false unless Ast.tagged?(n, :call, :method_add_arg, :command, :vcall, :fcall)

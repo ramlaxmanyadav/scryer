@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # Hand-rolled ANSI color/style helper for console output — deliberately
   # not a gem dependency (`pastel`, `colorize`, ...), consistent with

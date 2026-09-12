@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags a `*Controller` class that defines `create`/`update`/`destroy`

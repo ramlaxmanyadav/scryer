@@ -515,6 +515,44 @@ module Scryer
         ]
       },
 
+      "dangerous_eval" => {
+        rule_class: Scryer::Rules::DangerousEvalRule,
+        vulnerable: [
+          {
+            file: "app/controllers/configurations_controller.rb",
+            source: "eval(singular_instance)",
+            note: "anchor case from test/rule_fixtures_test.rb — a bare local variable, not params " \
+                  "directly; this rule flags any non-literal argument, not just a traced params reference"
+          },
+          {
+            file: "app/models/setting.rb",
+            source: 'instance_eval("self.#{attribute_name} = value")',
+            note: "instance_eval with an interpolated string — same non-literal standard, different " \
+                  "method from EVAL_METHODS"
+          },
+          {
+            file: "app/models/setting.rb",
+            source: "class_eval(definition)",
+            note: "class_eval with a bare variable — reopening a class at runtime with dynamic code " \
+                  "is exactly as dangerous as eval itself"
+          }
+        ],
+        safe: [
+          {
+            file: "app/controllers/configurations_controller.rb",
+            source: 'eval("1 + 1")',
+            note: "anchor clean case — a plain string literal with no interpolation at all"
+          },
+          {
+            file: "app/models/setting.rb",
+            source: "obj.instance_eval { do_something }",
+            note: "near miss: same method name as the vulnerable sample above, but a block instead " \
+                  "of a string argument — parses as :method_add_block, a different node shape this " \
+                  "rule's :method_add_arg/:command/:command_call matching never even sees"
+          }
+        ]
+      },
+
       "consider_all_requests_local_production" => {
         rule_class: Scryer::Rules::ConsiderAllRequestsLocalRule,
         vulnerable: [

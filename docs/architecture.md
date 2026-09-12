@@ -24,7 +24,7 @@ no Rails/database boot.
 
 Parsing is the only real cost, and it's linear in file count/size — there's no Rails boot, no
 database connection, and (with `--no-deps`) no network call at all. A real, unscoped scan of a
-236-file production Rails app (the same one behind the [Security score](#security-score) example
+236-file production Rails app (the same one behind the [Scores](#scores) example
 above) completes in about 2.5 seconds end to end on a laptop, `--no-deps` set. The one deliberately
 slower path is the [dependency audit](./rules.md#dependency-audit) (on by default): it queries
 [OSV.dev](https://osv.dev) once per unique gem in `Gemfile.lock`, so total time scales with distinct
@@ -91,55 +91,64 @@ normal for this class of tool, not a bug. An already-guarded call can still get 
 rules don't trace surrounding conditionals — always review a finding in its surrounding context
 before acting on it.
 
-## Security score
+## Scores
 
-Every scan produces a single 0-100 score plus a letter grade (A-F), shown in the console summary
-and as a badge at the very top of the HTML report:
+Every scan produces **four independent 0-100 scores**, each with its own letter grade (A-F) — one
+per category — shown in the console summary and as four badges at the very top of the HTML report:
 
 ```
-Security Score: 11/100 (F)
+Security Score:      11/100 (F)
+Performance Score:   62/100 (D)
+Style Score:        100/100 (A)
+Dependency Score:    88/100 (B)
 ```
 
-The formula (`ReportRenderer#security_score` in `lib/scryer/report_renderer.rb`): every security
-and dependency finding costs points, weighted by both its severity *and* its confidence (a
-`low`-confidence `idor` finding costs less than a `high`-confidence `sql_injection` finding at the
-same severity); performance findings cost points too, but at a fifth of that weight (a slow app is
-a real cost, just not a *security* one, so it nudges the score rather than driving it). Combined
-via exponential decay from 100 rather than linear subtraction — one critical finding visibly moves
-the score (100 → ~86) without a handful of findings driving any real app straight to a hard-clamped
-0.
+The formula is the same for all four (`ReportRenderer#category_score` in
+`lib/scryer/report_renderer.rb`, called once per category by `#security_score`/
+`#performance_score`/`#style_score`/`#dependency_score`): every finding *in that category* costs
+points, weighted by both its severity *and* its confidence (a `low`-confidence `idor` finding costs
+less than a `high`-confidence `sql_injection` finding at the same severity), combined via
+exponential decay from 100 rather than linear subtraction — one critical finding visibly moves that
+category's score (100 → ~86) without a handful of findings driving it straight to a hard-clamped 0.
+Crucially, the four scores never mix: a finding only ever affects the score for its own category, so
+a codebase that's security-clean but drowning in N+1 queries gets an honest `Performance Score: F`
+instead of that risk being invisible or diluted inside a single blended number. (Earlier versions of
+this gem had exactly one combined score that folded performance findings in at a diluted weight and
+dropped style findings entirely — that's what these four replaced.)
 
-Two things worth being precise about before you treat this number as meaningful:
+Two things worth being precise about before you treat these numbers as meaningful:
 
-- **It's not normalized by app size.** A 10-file app and a 1,000-file app with the same finding
-  *density* will score very differently here — this score reflects a scan's absolute finding
-  exposure, not a rate. That makes it useful for tracking *one project's own trend* over time (did
-  the next scan score higher or lower), not for comparing two differently-sized codebases against
-  each other.
-- **Code-quality findings are never part of it.** Duplicate-code groups and the one style check
-  (`frozen_string_literal`) are cosmetic, not risk, and stay out entirely — a duplicate-code group
-  isn't even backed by a `Finding` with a severity/confidence to weigh in the first place (see
-  `Scryer::DuplicateDetector`). Check the "Code Quality" row in the summary box separately for
-  that; performance findings, unlike code-quality ones, do count toward the score (lightly — see
-  above).
+- **None of them are normalized by app size.** A 10-file app and a 1,000-file app with the same
+  finding *density* will score very differently here — each score reflects that category's absolute
+  finding exposure in this scan, not a rate. That makes them useful for tracking *one project's own
+  trend* over time (did the next scan score higher or lower, in this category), not for comparing
+  two differently-sized codebases against each other.
+- **Duplicate-code groups have no score of their own.** A `DuplicateDetector::DuplicateGroup` isn't
+  even a `Finding` — no severity/confidence to weigh in the first place (see
+  `Scryer::DuplicateDetector`) — so it's excluded from all four; check the "Duplicate code" row in
+  the summary box directly for that. `Style Score` today is really just `frozen_string_literal`, the
+  one rule-based style check this gem has.
 
-Alongside the score, every scan also reports a **rule-level pass rate** — "how many of Scryer's
-registered checks fired zero findings":
+Alongside the four scores, every scan also reports one overall **rule-level pass rate** — "how many
+of Scryer's registered checks fired zero findings":
 
 ```
 Checks: 23/36 rules clean (63.9%)
 ```
 
 This is the closest thing Scryer has to Brakeman's "X checks, Y warnings" framing — a coverage
-signal, not a risk signal. It's deliberately a *different* number from the security score, and the
-two won't always agree: a codebase can have a high clean rate (few distinct rules ever fire) and
-still a low score (the few that did fire were severe and high-confidence), or the reverse (many
-different rules each firing once, none of them serious). `ReportRenderer#rules_clean_rate` computes
+signal, not a risk signal. It's deliberately a *different* number from the four scores above (and
+spans all three rule-backed categories together, rather than being split per-category itself), and
+they won't always agree: a codebase can have a high clean rate (few distinct rules ever fire) and
+still a low score in one category (the few that did fire there were severe and high-confidence), or
+the reverse (many different rules each firing once, none of them serious). `ReportRenderer#rules_clean_rate` computes
 it from `Scryer::RuleSet.all` (every registered security/performance/style rule) against which
 rule_ids actually appeared in this scan's findings — dependency checks aren't counted here since
 they're not backed by a `Scryer::Rule` subclass. Report both; neither alone tells the whole story.
 
-The 10/F above is a real score from the acme-app example, not a cherry-picked good result — see
+The Security Score above is illustrative of the format (four independent scores, one letter grade
+each) rather than one specific captured scan — see the README's own top-of-page example for a real,
+unmodified `Security Score: 10/100 (F)` from an actual live app, and
 [A note on how this gem was actually verified](#a-note-on-how-this-gem-was-actually-verified) for
 why every example in this README is real output.
 
@@ -245,7 +254,7 @@ sits alongside them and adds the cross-category picture neither one (nor bundler
   four categories) by severity, shown as "Top priorities" in the console summary and at the top of
   the HTML report — see the example near the top of this README.
 - **[k]** Not a Scryer-only capability — Brakeman's own warnings already include a CWE reference.
-  Scryer's version is a fuller mapping (every one of its 31 security rules carries both a CWE ID
+  Scryer's version is a fuller mapping (every one of its 32 security rules carries both a CWE ID
   and an OWASP Top 10 (2021) category, aggregated into an OWASP coverage scorecard in every
   report), but the underlying idea isn't new; see
   [What Scryer detects](./rules.md#what-scryer-detects) for the honesty caveat on how this mapping was built

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `config.session_store :cookie_store, ...` with no `secure: true`

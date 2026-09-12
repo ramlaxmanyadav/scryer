@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Opt-in Minitest integration — require this file yourself (e.g. `require
 # "scryer/minitest"` in test_helper.rb) rather than it loading automatically
 # with the gem; same reasoning as lib/scryer/rspec.rb (Minitest is never a

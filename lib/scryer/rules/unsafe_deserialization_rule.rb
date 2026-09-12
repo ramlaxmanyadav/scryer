@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `Marshal.load`, `YAML.load` (as opposed to `YAML.safe_load`), and

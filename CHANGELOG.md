@@ -5,6 +5,90 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- **Breaking (report shape): one blended `Security Score` replaced with four independent
+  scores** — `security_score`, `performance_score`, `style_score`, and `dependency_score`
+  (`ReportRenderer#category_score` runs the same severity+confidence-weighted formula for each,
+  scoped to only that category's own findings; see `SCORE_SEVERITY_WEIGHT`/
+  `SCORE_CONFIDENCE_WEIGHT`). Previously `security_score` folded performance findings in at a
+  diluted weight and dropped style findings entirely, which meant a codebase could be
+  security-clean but drowning in N+1 queries and the console/HTML report would barely show it. Now
+  each category gets its own 0-100 score and letter grade, and none of them dilute or leak into
+  another: `scryer`'s console summary prints all four (`Security Score`/`Performance Score`/
+  `Style Score`/`Dependency Score`, each `N/100 (grade)`; `Dependency Score` shows
+  `skipped (--no-deps)`/`skipped (nodeps)` when the dependency audit didn't run), and the HTML
+  report's top panel shows four badges instead of one. `as_hash`/JSON output gains
+  `performance_score`/`style_score`/`dependency_score` keys alongside the existing
+  `security_score` (whose own meaning changed: it's now security findings only, no longer
+  security + dependency + diluted-performance combined). `rules_clean_rate` is unchanged (still one
+  aggregate rule-level pass rate across all three rule-backed categories together — a different,
+  complementary signal, not itself split per-category). Covered by a rewritten
+  `test/security_score_test.rb`, including a dedicated independence test proving a finding in one
+  category never affects another's score.
+- Added `dangerous_eval` (new `Scryer::Rules::DangerousEvalRule`, CWE-95, critical severity): flags
+  `eval`/`instance_eval`/`class_eval`/`module_eval` called with anything other than a hardcoded
+  string literal with no interpolation — a real coverage gap (Scryer had no eval-injection check at
+  all), reported against a real `eval(singular_instance)` finding another scanner caught and Scryer
+  didn't. Deliberately broader than this gem's other injection rules (sql_injection/mass_assignment/
+  ssrf/path_traversal only fire when the argument traces back to `params` specifically): an
+  eval-family argument has essentially no legitimate reason to be anything but a literal the
+  developer wrote, so this fires on *any* non-literal argument — a local variable, an ivar, a method
+  call, an interpolated string — regardless of where the value actually came from. Confidence varies
+  the same way a taint-analysis scanner's own "Dangerous Eval" check varies confidence with its
+  taint engine (High vs Weak): `high` when `params` is directly visible in the argument's own expression (e.g.
+  `eval(params[:code])`), `medium` otherwise — the closest signal available without real data-flow
+  tracing. Severity stays `critical` either way regardless of confidence: the blast radius if the
+  argument is ever attacker-influenced doesn't depend on how sure Scryer is today, and `eval` is
+  never the *correct* way to do dynamic dispatch even when today's value happens to be safe
+  (`const_get`/`safe_constantize` do the same job with zero code-execution risk). A block-only call
+  (`obj.instance_eval { ... }`, no string argument) is never flagged. Covered by
+  `test/rule_fixtures_test.rb`, a new `test/dangerous_eval_rule_test.rb` (9 tests, including the
+  confidence split), and a new `benchmark/corpus.rb` entry (100%/100%/100% precision/recall/F1).
+- Fixed: `mass_assignment`, `idor`, and `missing_policy_scope` false-positived on a plain Ruby
+  service/command object's constructor or class-level entry point (e.g. an internal
+  `Server.new(params).call` convention, or the equivalent `interactor`-gem-style
+  `SomeThingInteractor.call(params)`) — syntactically identical to `Order.new(params)` (a bare
+  constant, a `.new`/`.find`/`.where`-adjacent verb, a raw `params` argument), but none of these
+  calls write request data onto ActiveRecord attributes by themselves. Two fixes, in order of
+  precedence:
+  - **Project-wide model resolution** (`Scanner#call`, new): every scan now walks every
+    `class X < Y` declaration across every scanned file once, up front, and resolves which class
+    names actually descend from `ApplicationRecord`/`ActiveRecord::Base` (transitively — an
+    abstract per-shard base class or an STI subclass still resolves correctly), and which classes
+    are declared with *no* superclass at all or with a superclass matching `/\AApplication(?!Record\z)/`
+    (`ApplicationJob`, `ApplicationMailer`, a project's own `ApplicationService`, ...) — neither
+    shape an ActiveRecord model is ever declared with, so that's an unconditional "definitely not a
+    model" signal regardless of the class's name. This is the general fix: a service object with
+    *any* name is now excluded as long as it's declared somewhere in the scanned project, and a
+    real model is never wrongly excluded just because its name happens to look like a service
+    object (e.g. a model genuinely named `Command`). See `Ast.likely_model_name?` and
+    `Scanner#collect_class_declarations`/`#resolve_known_models`.
+  - **Naming-convention fallback** (unchanged from the original fix, only reached when a class
+    isn't declared anywhere Scryer scanned — a gem-provided constant, or outside `c.dirs`):
+    `Ast::NON_MODEL_RECEIVER_SUFFIXES` excludes constants ending in `Service`, `Server`,
+    `Interactor`, `Operation`, `Command`, or `UseCase`.
+  All three rules' previously-duplicated `NON_MODEL_RECEIVERS` exclusion lists are now one shared
+  `Ast::NON_MODEL_RECEIVER_NAMES`. Covered by new `test/mass_assignment_rule_test.rb` and
+  `test/scanner_known_models_test.rb` — no prior dedicated test file existed for `MassAssignmentRule`
+  at all, and no prior test exercised known-model resolution across files (inherently impossible to
+  test via a single-file `scan_with` call).
+
+## [1.2.1] - 2026-09-04
+
+- Fixed: a platform-specific gem's `Gemfile.lock` spec line (e.g. `nokogiri (1.19.4-x86_64-linux-musl)`)
+  fed its unstripped `1.19.4-x86_64-linux-musl` version straight into `DependencyAudit.vulnerable_gems`'s
+  OSV.dev query, which parsed the platform suffix as a semver prerelease marker — sorting the
+  version as *older* than the plain release and matching every advisory fixed at-or-before it as
+  still open. Confirmed directly against OSV.dev: querying the unstripped string for `nokogiri`
+  returned 8 vulnerabilities; querying the real `1.19.4` returned 0. `DependencyAudit.parse_lockfile`
+  now strips the hyphen-separated platform suffix (RubyGems versions never contain a hyphen, so this
+  never touches a real prerelease version like `1.0.0.pre1`). Covered by a new `test/dependency_audit_test.rb`.
+- Fixed: the HTML report's Summary table showed a `—` placeholder for every severity column on the
+  Dependency audit row (no breakdown at all), and its Total row's sum silently excluded dependency
+  findings entirely — so a report with only dependency findings showed `0/0/0/0` in this table's
+  Total row while the severity bars in the executive summary just above it (which do count
+  dependency findings) showed nonzero counts, two different totals on the same page. Both rows now
+  count dependency findings by severity like every other row. Covered by a new
+  `test/report_renderer_summary_table_test.rb`.
 - Security score changes: `info`-severity findings weighed too heavily — `SCORE_SEVERITY_WEIGHT["info"]`
   dropped from `1` to `0.25` (critical stays `15`, warning stays `6`); an info finding is closer to
   a cosmetic note than a real risk (e.g. `csrf_protection_disabled`'s narrowly-scoped-skip case), so
@@ -340,10 +424,10 @@ All notable changes to this project are documented here. Format loosely follows
   `properties` and a combined severity+confidence `rank`). Performance/style rules get a
   `confidence` too (no CWE/OWASP — that taxonomy is security-specific). This is Scryer's own
   best-effort categorization for practitioner convenience, not an OWASP-endorsed or independently
-  audited mapping — see the README's "What Scryer detects" section for the full caveat. Brakeman
-  already tags CWE and reports a confidence level for its own warnings; this isn't a novel
-  capability, just a fuller version of something that idea already existed elsewhere (see the
-  comparison table's new footnote).
+  audited mapping — see the README's "What Scryer detects" section for the full caveat.
+  Taint-analysis scanners already tag CWE and report a confidence level for their own warnings;
+  this isn't a novel capability, just a fuller version of something that idea already existed
+  elsewhere (see the comparison table's new footnote).
 - New `ReportRenderer#owasp_coverage` — counts security findings per OWASP Top 10 category, shown
   as a console summary block ("OWASP Top 10 (2021) coverage:") and a new HTML report section, a
   direct byproduct of every security rule now carrying an `owasp_category`.
@@ -375,9 +459,9 @@ All notable changes to this project are documented here. Format loosely follows
   performed.
 - Repositioned the README, gemspec, docs site, and llms.txt around this: Scryer's differentiator
   isn't "one command instead of several tools," it's ranking risk *across* security, performance,
-  dependencies, and code quality — something none of RuboCop/Brakeman/bundler-audit do even
-  within their own domain, let alone across all four. The honest heuristic-vs-taint-analysis
-  framing versus Brakeman (and the `idor` false-positive caveat) carries over unchanged from the
+  dependencies, and code quality — something none of RuboCop/a taint-analysis scanner/bundler-audit
+  do even within their own domain, let alone across all four. The honest heuristic-vs-taint-analysis
+  framing versus taint-analysis scanners (and the `idor` false-positive caveat) carries over unchanged from the
   1.0.0 comparison table — this is a reframing of what Scryer adds, not a new claim about
   detection accuracy.
 
@@ -434,8 +518,8 @@ All notable changes to this project are documented here. Format loosely follows
 ## [1.0.0] - 2026-08-13
 
 Seventeen new security rules, a SARIF report format, a Ruby end-of-life check, and a
-credentials-exposure check — see the README's "Scryer vs RuboCop vs Brakeman vs bundler-audit"
-section for how the new security coverage is positioned (heuristic pattern-matching, not taint
+credentials-exposure check — see the README's "Scryer vs RuboCop vs a taint-analysis scanner vs
+bundler-audit" section for how the new security coverage is positioned (heuristic pattern-matching, not taint
 analysis; `idor` in particular carries real false-positive risk by nature of the problem).
 
 - New security rules (all `category: "security"`, skippable individually via `--skip RULE_ID` /

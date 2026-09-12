@@ -58,8 +58,11 @@ HTML report: tmp/scryer_report.html
 That's real output from a scan of a live 236-file Rails app (an internal production codebase we
 call "acme-app" here — file/controller names above are anonymized, since we don't publish that
 app's source; the finding counts, severities, rule IDs, and line numbers are exactly as scanned,
-unedited) — not a mockup, and the harsh grade is real too (see
-[Security score](docs/architecture.md#security-score) for what it does and doesn't mean). "Top priorities" is the same
+unedited) — not a mockup, and the harsh grade is real too. This capture predates the current
+version, which reports four independent scores (Security/Performance/Style/Dependency, each with
+its own grade) instead of the single `Security Score` line shown above — see
+[Scores](docs/architecture.md#scores) for the current format and what each one does and doesn't
+mean. "Top priorities" is the same
 severity ranking [`ReportRenderer#top_risks`](lib/scryer/report_renderer.rb) applies across *all*
 categories — security, dependencies, performance, code quality — not just within each one; in the
 HTML report it's at the top of the Findings section, ahead of the 309 individual findings
@@ -73,7 +76,7 @@ below for exactly how this differs from what those tools do.
   security vulnerabilities, performance heuristics, dependency risk, and code-quality issues in one
   scan, ranked by severity across all four categories. See
   [What Scryer detects](docs/rules.md#what-scryer-detects).
-- **Is it Rails-specific?** Most of the 31 security rules target Rails conventions specifically
+- **Is it Rails-specific?** Most of the 32 security rules target Rails conventions specifically
   (controllers, `config/environments/*`, Active Storage, Action Cable, `params`), but the scanning
   engine itself only needs Ruby source — no Rails app or database required to run it. See
   [Designed for Ruby](docs/rules.md#designed-for-ruby).

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module PerformanceRules
     # Flags `.save`/`.save!`/`.update`/`.update!`/`.update_attribute(s)` called

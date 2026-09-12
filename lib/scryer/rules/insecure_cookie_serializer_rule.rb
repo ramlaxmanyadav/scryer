@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `config.action_dispatch.cookies_serializer = :marshal`. Rails

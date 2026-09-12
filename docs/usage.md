@@ -61,7 +61,7 @@ example — followed by where each report was written.
 
 **Color.** The summary box, top priorities, and `scryer fix`/`scryer verify` output are colored
 automatically at a real terminal — severity labels (`critical`/`warning`/`info` → red/yellow/cyan),
-the security score's letter grade (A/B green, C yellow, D/F red), fixed/skipped status lines, and
+each score's letter grade (A/B green, C yellow, D/F red), fixed/skipped status lines, and
 so on. Off automatically whenever it would be wrong to color: piped/redirected output (e.g. `-o -`
 to a file, or piped to `less` without `-R`), [`NO_COLOR`](https://no-color.org) set, or
 `TERM=dumb`. `--color`/`--no-color` force it either way regardless of any of that — e.g. `scryer
@@ -282,7 +282,10 @@ scryer --baseline tmp/scryer_baseline.json -o scryer.sarif
 ```
 Baseline: tmp/scryer_baseline.json — showing new findings only (2 fixed since baseline).
 
-Security Score: 96/100 (A)
+Security Score:      96/100 (A)
+Performance Score:   90/100 (A)
+Style Score:        100/100 (A)
+Dependency Score:    88/100 (B)
 
 Security                 1 finding
 ...

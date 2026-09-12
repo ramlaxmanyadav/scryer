@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags the well-known Rack::Cors antipattern: a wildcard origin

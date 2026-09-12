@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "ripper"
 require "set"
 
@@ -26,6 +27,20 @@ module Scryer
     QUERY_SIMILARITY_THRESHOLD = 0.7
     CACHE_SIMILARITY_THRESHOLD = 0.7
 
+    # Real ActiveRecord model base classes — a class transitively inheriting
+    # from one of these (see #model_via_chain?) goes into known_models.
+    KNOWN_MODEL_BASE_CLASSES = %w[ApplicationRecord ActiveRecord::Base].freeze
+
+    # Rails generates exactly one non-model "Application*" base class per
+    # concern (ApplicationController, ApplicationJob, ApplicationMailer,
+    # ApplicationCable::Connection/Channel) — ApplicationRecord is the only
+    # one of that family that models actually inherit from. A class
+    # inheriting from anything else matching this shape (including a
+    # project's own equivalent, e.g. a hand-rolled `ApplicationService`)
+    # can never also be an ActiveRecord model, regardless of what it's
+    # named — see Ast.likely_model_name?'s known_non_models.
+    NON_MODEL_SUPERCLASS_PATTERN = /\AApplication(?!Record\z)\w*\z/.freeze
+
     Result = Struct.new(:security_findings, :performance_findings, :style_findings, :duplicate_groups, :files_scanned, :parse_errors, keyword_init: true)
 
     # `skip_rules` silences specific checks by rule_id (e.g. a known false
@@ -48,13 +63,27 @@ module Scryer
 
     def call
       files = collect_files
-      all_methods = []
-      all_queries = []
-      all_cache_calls = []
-      security_findings = []
-      performance_findings = []
-      style_findings = []
+      parsed_files = []
       parse_errors = []
+
+      # First pass: read + parse every file exactly once (cached in
+      # parsed_files for the second pass below) and, while we're already
+      # walking each file's sexp, collect every `class X < Y` declaration
+      # into class_superclass/no_superclass_classes/application_family_classes
+      # — the raw material #resolve_known_models/#resolve_known_non_models
+      # turn into a real, project-wide "is this actually an ActiveRecord
+      # model" signal (see Ast.likely_model_name?'s doc comment for why this
+      # exists: a plain Ruby service/command object's `.new(params)` call
+      # looks identical to a real model's, and no per-file view can tell
+      # them apart — this can, because it's seen every class declaration in
+      # the project before any rule runs). Has to be a separate pass from
+      # rule-scanning below: a model declared in one file needs to be known
+      # before an *earlier-processed* file's controller referencing it is
+      # scanned, which a single combined pass can't guarantee regardless of
+      # file processing order.
+      class_superclass = {}
+      no_superclass_classes = Set.new
+      application_family_classes = Set.new
 
       files.each do |abs_path|
         rel_path = abs_path.sub(/\A#{Regexp.escape(@root)}\/?/, "")
@@ -72,6 +101,21 @@ module Scryer
           next
         end
 
+        parsed_files << [rel_path, source, sexp]
+        collect_class_declarations(sexp, class_superclass, no_superclass_classes, application_family_classes)
+      end
+
+      known_models = resolve_known_models(class_superclass)
+      known_non_models = no_superclass_classes | application_family_classes
+
+      all_methods = []
+      all_queries = []
+      all_cache_calls = []
+      security_findings = []
+      performance_findings = []
+      style_findings = []
+
+      parsed_files.each do |rel_path, source, sexp|
         RuleSet.all.each do |rule_class|
           next if @skip_rules.include?(rule_class.rule_id.to_s)
 
@@ -83,7 +127,8 @@ module Scryer
             end
           next unless bucket
 
-          bucket.concat(rule_class.new(file: rel_path, source: source, sexp: sexp).scan)
+          bucket.concat(rule_class.new(file: rel_path, source: source, sexp: sexp,
+                                        known_models: known_models, known_non_models: known_non_models).scan)
         end
 
         if @detect_duplicates && duplicate_detection_target?(rel_path)
@@ -120,6 +165,80 @@ module Scryer
     end
 
     private
+
+    # Records one file's `class X < Y` (and `module X`) declarations into the
+    # three accumulators #call builds across every scanned file.
+    # `class_superclass` maps a class's own (last-segment) name to its
+    # superclass's full name (kept full, not truncated, so e.g.
+    # "ActiveRecord::Base" still matches KNOWN_MODEL_BASE_CLASSES exactly in
+    # #model_via_chain? before that method truncates it to walk the chain
+    # further). A class declared with literally no superclass (`class
+    # Server; end`) goes straight into no_superclass_classes — no real
+    # ActiveRecord model is ever declared that way, so this is an
+    # unconditional, safe "definitely not a model" signal regardless of the
+    # class's name. `module X` gets the same treatment for the same reason:
+    # a bare Ruby module (e.g. this gem's own `RuleSet`) can never be an
+    # ActiveRecord model either, which matters for rules like
+    # UnboundedTableScanRule/NPlusOneQueryRule that otherwise treat any
+    # `Const.all.each`-shaped call as a possible query on a model.
+    def collect_class_declarations(sexp, class_superclass, no_superclass_classes, application_family_classes)
+      Ast.each_node(sexp) do |node|
+        if Ast.tagged?(node, :module)
+          name = Ast.class_name(node[1])
+          no_superclass_classes << last_segment(name) if name
+          next
+        end
+
+        next unless Ast.tagged?(node, :class)
+
+        name = Ast.class_name(node[1])
+        next unless name
+
+        last = last_segment(name)
+        superclass_node = node[2]
+
+        if superclass_node.nil?
+          no_superclass_classes << last
+          next
+        end
+
+        superclass_name = Ast.class_name(superclass_node)
+        next unless superclass_name
+
+        application_family_classes << last if superclass_name.match?(NON_MODEL_SUPERCLASS_PATTERN)
+        class_superclass[last] = superclass_name
+      end
+    end
+
+    # Every class name in class_superclass whose superclass chain
+    # terminates in ApplicationRecord/ActiveRecord::Base, resolved
+    # transitively (`class Order < ShardedRecord` + `class ShardedRecord <
+    # ApplicationRecord` both scanned) — not just direct inheritance, so
+    # e.g. a real Rails app's own abstract per-shard base classes, or STI
+    # subclasses, are recognized as models too.
+    def resolve_known_models(class_superclass)
+      class_superclass.each_key.select { |name| model_via_chain?(name, class_superclass) }.to_set
+    end
+
+    # `seen` guards against an (invalid, but not this method's job to
+    # reject) inheritance cycle recursing forever.
+    def model_via_chain?(name, class_superclass, seen = Set.new)
+      return false if seen.include?(name)
+
+      seen << name
+      superclass = class_superclass[name]
+      return false unless superclass
+      return true if KNOWN_MODEL_BASE_CLASSES.include?(superclass)
+
+      next_name = last_segment(superclass)
+      return false unless class_superclass.key?(next_name)
+
+      model_via_chain?(next_name, class_superclass, seen)
+    end
+
+    def last_segment(name)
+      name.to_s.split("::").last
+    end
 
     def duplicate_detection_target?(relative_path)
       segments = relative_path.split("/")

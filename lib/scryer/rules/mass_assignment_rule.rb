@@ -1,10 +1,16 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `Model.new(params[...])` / `Model.new(params)` / `.update(params[...])`
     # / `.assign_attributes(params)` where the argument is `params` (or a
     # subscript of it) with no `.permit(...)` anywhere in the same argument
     # expression — i.e. attributes are being mass-assigned straight from the
-    # request with no allow-list.
+    # request with no allow-list. "Is the receiver actually an ActiveRecord
+    # model" is answered by Ast.likely_model_name? (known_models/
+    # known_non_models, resolved once per scan by Scanner from every
+    # `class X < Y` declaration it saw — see its own doc comment) — this
+    # rule only supplies the receiver-shape acceptance itself (a bare
+    # constant, an implicit receiver, or an ivar for the update-style verbs).
     class MassAssignmentRule < Rule
       self.rule_id = "mass_assignment"
       self.category = "security"
@@ -31,18 +37,6 @@ module Scryer
       # only the update-style verbs keeps this from also matching things like
       # `@filters.update(params[:filters])` on a Hash.
       IVAR_RECEIVER_METHODS = %w[update update! assign_attributes attributes=].freeze
-
-      # Common stdlib/gem constants with their own `.new`/`.create`-style
-      # factory methods that have nothing to do with ActiveRecord mass
-      # assignment (e.g. `BCrypt::Password.create(params[:password])` is
-      # hashing a single value, not setting a hash of model attributes).
-      # Excluding these — plus anything referenced through a namespaced
-      # `A::B` path, which real Rails models are less commonly called via at
-      # the exact call site — cuts down false positives significantly.
-      NON_MODEL_RECEIVERS = %w[
-        Struct OpenStruct Data Class Module BCrypt OpenSSL Net URI Digest
-        JSON YAML Marshal String Array Hash Integer Float Symbol Comparable
-      ].freeze
 
       def scan
         findings = []
@@ -83,8 +77,8 @@ module Scryer
       private
 
       # true for an implicit receiver (bare `create(...)` inside the model
-      # itself), a plain unnamespaced constant reference (`Order`) that isn't
-      # a known non-model stdlib/gem constant, or — for the update-style
+      # itself), a plain unnamespaced constant reference (`Order`) Ast.
+      # likely_model_name? doesn't rule out, or — for the update-style
       # verbs only, see IVAR_RECEIVER_METHODS — an instance variable
       # (`@order`); false for namespaced constant paths (`BCrypt::Password`,
       # `Admin::Order` — a real gap, see mass_assignment_rule's class comment
@@ -97,7 +91,7 @@ module Scryer
         const_node = receiver[1]
         return false unless const_node.is_a?(Array) && const_node[0] == :@const
 
-        !NON_MODEL_RECEIVERS.include?(const_node[1])
+        Ast.likely_model_name?(const_node[1], known_models: known_models, known_non_models: known_non_models)
       end
 
       def ivar_receiver?(node)

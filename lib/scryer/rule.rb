@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # Base class for a single detection rule. Subclasses implement `#scan` and
   # return an Array of Finding. Every rule gets the parsed sexp tree (so it
@@ -30,13 +31,25 @@ module Scryer
       end
     end
 
-    def initialize(file:, source:, sexp:)
+    # `known_models`/`known_non_models` — Sets of unqualified, last-segment
+    # class names Scanner#call resolved once per scan by walking every
+    # `class X < Y` declaration across every scanned file (see its own
+    # comment, and Ast.likely_model_name?, for what these mean and why they
+    # exist) — a real, project-wide signal for "is this class actually an
+    # ActiveRecord model," instead of the pure name-guessing
+    # MassAssignmentRule/IdorRule/MissingPolicyScopeRule used to each do
+    # independently. Optional and empty by default: only those three rules
+    # read them; every other rule (and every existing direct `Rule.new` call
+    # outside Scanner, e.g. in tests) is unaffected.
+    def initialize(file:, source:, sexp:, known_models: Ast::EMPTY_SET, known_non_models: Ast::EMPTY_SET)
       @file = file
       @source = source
       @sexp = sexp
+      @known_models = known_models
+      @known_non_models = known_non_models
     end
 
-    attr_reader :file, :source, :sexp
+    attr_reader :file, :source, :sexp, :known_models, :known_non_models
 
     def scan
       raise NotImplementedError, "#{self.class} must implement #scan"

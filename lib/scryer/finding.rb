@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   # A single reported issue. `suggested_fix` is always a human-reviewable text
   # explanation + example patch, never something auto-applied — see the

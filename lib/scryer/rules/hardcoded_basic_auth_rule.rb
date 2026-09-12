@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Scryer
   module Rules
     # Flags `http_basic_authenticate_with` calls whose `password:` (or
