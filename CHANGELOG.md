@@ -3,8 +3,26 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.2.2] - 2026-09-12
 
+- HTML report redesign: the top-of-report score panel is now a card (soft shadow, rounded
+  corners) instead of a flat box, the four grade badges are gradient-filled rounded squares
+  instead of plain circles, and the severity bars use a CSS grid for consistent label/track/count
+  alignment instead of flexbox eyeballing. Purely visual — no change to report content or data.
+- Fixed: `Scryer::CLI#git` shelled out via backtick interpolation
+  (`` `git -C #{Shellwords.escape(root)} #{cmd}` ``) — flagged by Scryer's own `command_injection`
+  rule on a self-scan. Replaced with `Open3.capture3("git", "-C", root, *cmd)`, an argv array with
+  no shell involved at all, so there's nothing to escape or inject regardless of what `root`
+  contains. `cmd` callers now pass argv words instead of a pre-joined string.
+- Added the `# frozen_string_literal: true` magic comment to every file under `lib/` that was
+  missing it (66 files) — this gem's own `frozen_string_literal` rule fired on itself.
+- Fixed: `unbounded_table_scan` and `n_plus_one_query` false-positived on any bare
+  `Const.all`/`.where`/`.order`-shaped call, even when `Const` was a plain Ruby module/class with
+  no ActiveRecord ancestry (e.g. this gem's own `RuleSet.all.each`) — neither rule consulted
+  `known_models`/`known_non_models` at all. Both now gate their match through
+  `Ast.likely_model_name?`, same as `IdorRule` already did. `Scanner#collect_class_declarations`
+  also now records every `module X` declaration as a "definitely not a model" signal (a bare
+  module can never be `< ActiveRecord::Base`), alongside the existing no-superclass-class signal.
 - **Breaking (report shape): one blended `Security Score` replaced with four independent
   scores** — `security_score`, `performance_score`, `style_score`, and `dependency_score`
   (`ReportRenderer#category_score` runs the same severity+confidence-weighted formula for each,
